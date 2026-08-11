@@ -39,26 +39,26 @@ def load_pretrained_model(model_path, model_args, mask_config='/mask_config/mask
     mask_cfg = get_mask_config(mask_config)
     mask_cfg.MODEL.MASK_FORMER.SEG_TASK = model_args.seg_task if hasattr(model_args, 'seg_task') else 'instance'
 
-    # tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True) changed due to fp32
-    # model = SegEarthR2.from_pretrained(model_path, mask_decoder_cfg=mask_cfg, **kwargs)
-
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
     model = SegEarthR2.from_pretrained(model_path, mask_decoder_cfg=mask_cfg, **kwargs)
 
-    vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(device=device, dtype=torch.float16)
+    # tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+    # model = SegEarthR2.from_pretrained(model_path, mask_decoder_cfg=mask_cfg, **kwargs)
 
-    vision_tower_mask = model.get_model().get_vision_tower_mask()
-    vision_tower_mask.to(device=device, dtype=torch.float16)
-    image_processor = vision_tower_mask.image_processor
+    # vision_tower = model.get_model().get_vision_tower()
+    # vision_tower.to(device=device, dtype=torch.float16)
 
-    model.resize_token_embeddings(len(tokenizer))
-    
-    # vision_tower = model.get_model().get_vision_tower_mask() Changed due to fp32
-    # vision_tower.to(device=device)
-    # image_processor = vision_tower.image_processor
+    # vision_tower_mask = model.get_model().get_vision_tower_mask()
+    # vision_tower_mask.to(device=device, dtype=torch.float16)
+    # image_processor = vision_tower_mask.image_processor
 
     # model.resize_token_embeddings(len(tokenizer))
+    
+    vision_tower = model.get_model().get_vision_tower_mask()
+    vision_tower.to(device=device)
+    image_processor = vision_tower.image_processor
+
+    model.resize_token_embeddings(len(tokenizer))
 
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
