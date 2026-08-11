@@ -12,7 +12,7 @@ from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.utils.memory import retry_if_cuda_oom
-from mamba_ssm import Mamba #Using Mamba
+# from mamba_ssm import Mamba #Using Mamba
 
 from ..mipha.model.language_model.mipha_phi import (MiphaPhiForCausalLM, MiphaPhiModel)
 from ..reason_fusion import ReasonFusion #Setup for Reason fusion
@@ -138,33 +138,33 @@ class ReasonFusion(nn.Module): #Setup for Reason Fusion
         return reason, refined_features
         
         
-class MambaSpatialRefiner(nn.Module): #MambaSpatialRefiner
-    def __init__(self, channels, d_state=16, d_conv=4, expand=2):
-        super().__init__()
-        self.norm = nn.LayerNorm(channels)
-        self.mamba_fwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
-        self.mamba_bwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
-        self.out_proj = nn.Conv2d(channels * 2, channels, kernel_size=1)
-        nn.init.zeros_(self.out_proj.weight)
-        nn.init.zeros_(self.out_proj.bias)
-        #self.alpha_fwd = nn.Parameter(torch.tensor(0.5))
-        #self.alpha_bwd = nn.Parameter(torch.tensor(0.5))
-        self.direction_weights = nn.Parameter(torch.zeros(2))
-        self.residual_gate = nn.Parameter(torch.tensor(0.5))
-    def forward(self, x):
-        B, C, H, W = x.shape
-        seq = x.flatten(2).transpose(1, 2)
-        seq_n = self.norm(seq)
-        fwd = self.mamba_fwd(seq_n)
-        weights = torch.softmax(self.direction_weights, dim=0)
-        bwd = self.mamba_bwd(seq_n.flip(dims=[1])).flip(dims=[1])
-        fwd = weights[0]* fwd
-        bwd = weights[1] * bwd
+# class MambaSpatialRefiner(nn.Module): #MambaSpatialRefiner
+#     def __init__(self, channels, d_state=16, d_conv=4, expand=2):
+#         super().__init__()
+#         self.norm = nn.LayerNorm(channels)
+#         self.mamba_fwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+#         self.mamba_bwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+#         self.out_proj = nn.Conv2d(channels * 2, channels, kernel_size=1)
+#         nn.init.zeros_(self.out_proj.weight)
+#         nn.init.zeros_(self.out_proj.bias)
+#         #self.alpha_fwd = nn.Parameter(torch.tensor(0.5))
+#         #self.alpha_bwd = nn.Parameter(torch.tensor(0.5))
+#         self.direction_weights = nn.Parameter(torch.zeros(2))
+#         self.residual_gate = nn.Parameter(torch.tensor(0.5))
+#     def forward(self, x):
+#         B, C, H, W = x.shape
+#         seq = x.flatten(2).transpose(1, 2)
+#         seq_n = self.norm(seq)
+#         fwd = self.mamba_fwd(seq_n)
+#         weights = torch.softmax(self.direction_weights, dim=0)
+#         bwd = self.mamba_bwd(seq_n.flip(dims=[1])).flip(dims=[1])
+#         fwd = weights[0]* fwd
+#         bwd = weights[1] * bwd
 
-        merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
-        #merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
-        gate = torch.sigmoid(self.residual_gate)
-        return x + gate*self.out_proj(merged)
+#         merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
+#         #merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
+#         gate = torch.sigmoid(self.residual_gate)
+#         return x + gate*self.out_proj(merged)
 
 class AttentionLoss(nn.Module):
     def __init__(self, reduction='batchmean'):
@@ -315,9 +315,9 @@ class SegEarthR2(MiphaPhiForCausalLM):
             self.initial_mask_module()
         self.post_init()
 
-    def refine_with_mamba(self, mask_features, multi_scale_features): #Added Mamba
-        multi_scale_features = [self.mamba_refiner(feat) for feat in multi_scale_features]
-        return mask_features, multi_scale_features
+    # def refine_with_mamba(self, mask_features, multi_scale_features): #Added Mamba
+    #     multi_scale_features = [self.mamba_refiner(feat) for feat in multi_scale_features]
+    #     return mask_features, multi_scale_features
 
     def initial_mask_module(self, pretrained_path=None, model_args=None):
         if not self.is_train_mask_decode:
@@ -331,9 +331,9 @@ class SegEarthR2(MiphaPhiForCausalLM):
         self.pixel_decoder = self.pixel_decoder_init(cfg=self.mask_decoder_cfg, input_shape=input_shape)
         self.predictor = self.predictor_init(cfg=self.mask_decoder_cfg)
 
-        self.mamba_refiner = MambaSpatialRefiner(  # Added Mamba
-            channels=self.mask_decoder_cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM  # 256
-        )
+        # self.mamba_refiner = MambaSpatialRefiner(  # Added Mamba
+        #     channels=self.mask_decoder_cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM  # 256
+        # )
 
         #if self.language_mamba_fwd is None:
 
@@ -896,7 +896,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
         if image_features is not None:     
             mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(
                 image_features)
-            mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
+            # mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
             mask_num = torch.tensor(mask_num, device=mask_features.device)
             mask_features = torch.repeat_interleave(mask_features, repeats=mask_num, dim=0)
             multi_scale_features = [
@@ -1079,7 +1079,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
 
         mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(
             image_features)
-        mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
+        # mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
         images = [image.repeat((num, 1, 1, 1)) for image, num in zip(images, mask_num)]
         images = [s[0] for image_repeat in images for s in torch.split(image_repeat, 1, dim=0)]
         mask_num = torch.tensor(mask_num, device=mask_features.device)
@@ -1184,7 +1184,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
 
             mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(
                 image_features)
-            mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
+            # mask_features, multi_scale_features = self.refine_with_mamba(mask_features, multi_scale_features)  # Added Mamba
             mask_num = [SEG_embedding.shape[0]]
             images = [image.repeat((num, 1, 1, 1)) for image, num in zip(images, mask_num)]
             images = [s[0] for image_repeat in images for s in torch.split(image_repeat, 1, dim=0)]
