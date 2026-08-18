@@ -188,7 +188,7 @@ def main():
     )
 
     device = torch.device(data_args.local_rank if torch.cuda.is_available() else "cpu")
-    model.to(dtype=torch.float32, device=device)
+    model.to(dtype=torch.float16, device=device)
     model.eval()
 
     print("---------- Model Initialization Complete ----------")
@@ -268,8 +268,8 @@ def do_eval(model, eval_dataloader, split, data_args, device):
             outputs = model.eval_seg(
                 input_ids=inputs_gpu['input_ids'],
                 attention_mask=inputs_gpu['attention_mask'],
-                images=inputs_gpu['images'].to(dtype=torch.float32),
-                images_clip=inputs_gpu['images_clip'].to(dtype=torch.float32),
+                images=inputs_gpu['images'].to(dtype=torch.float16),
+                images_clip=inputs_gpu['images_clip'].to(dtype=torch.float16),
                 seg_info=inputs_gpu['seg_info'],
                 token_refer_id=inputs_gpu['token_refer_id'],
                 SEG_token_embedding_indices=inputs_gpu['SEG_token_embedding_indices'],
