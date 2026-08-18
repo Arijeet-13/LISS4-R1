@@ -1112,6 +1112,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
             if gt_mask is not None:
                 if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
                     gt_mask = gt_mask[0]
+                print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
                 gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
                 gt_mask = F.interpolate(
                     gt_mask,
