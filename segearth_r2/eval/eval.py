@@ -84,6 +84,7 @@ def compute_metric(intersection_meter, union_meter, acc_iou_meter, pr_meters,
     thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
     for threshold in thresholds:
         pr_meters[threshold].update(1.0 if foreground_iou > threshold else 0.0, n=1)
+    
 
 _DENORM_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
 _DENORM_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
@@ -355,6 +356,7 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                     intersection_meter, union_meter, acc_iou_meter, pr_meters,
                     pred_t, gt_t, ignore_index=data_args.ignore_index
                 )
+                print(f"pred_sum={pred_t.sum().item()}, gt_sum={gt_t.sum().item()}, overlap={(pred_t & gt_t).sum().item()}")
 
                 image_id = seg['image_id']
                 mask_id = seg['mask_id']
