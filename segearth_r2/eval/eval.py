@@ -283,6 +283,8 @@ def do_eval(model, eval_dataloader, split, data_args, device):
 
                 pred_bin = (pred_np > 0).astype(np.int64).squeeze()
                 gt_bin = (gt_np > 0).astype(np.int64).squeeze()
+                if pred_bin.ndim != 2 or gt_bin.ndim != 2:
+                    print(f"WARNING: unexpected shape — pred {pred_bin.shape}, gt {gt_bin.shape}, image {seg.get('image_id')}")
                 pred_t = torch.from_numpy(pred_bin).to(device)
                 gt_t = torch.from_numpy(gt_bin).to(device)
 
