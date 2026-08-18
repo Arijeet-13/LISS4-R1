@@ -260,6 +260,9 @@ def do_eval(model, eval_dataloader, split, data_args, device):
         for idx, inputs in tqdm(enumerate(eval_dataloader), total=len(eval_dataloader)):
             mask_num = inputs['mask_num'][0]
             if mask_num == 0 or len(inputs['seg_info']) == 0:
+                acc_iou_meter.update(np.array([1.0, 1.0]), n=1)
+                for threshold in thresholds:
+                    pr_meters[threshold].update(1.0, n=1)
                 n_skipped_empty += 1
                 continue
 
