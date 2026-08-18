@@ -313,9 +313,9 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                         alpha=data_args.overlay_alpha,
                     )
 
-    print(acc_iou_meter)
-    print(intersection_meter)
-    print(union_meter)
+    print(acc_iou_meter.avg)
+    print(intersection_meter.sum)
+    print(union_meter.sum)
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     print(iou_class)
     cIoU = iou_class[1]
