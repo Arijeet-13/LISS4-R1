@@ -15,7 +15,7 @@ from detectron2.utils.memory import retry_if_cuda_oom
 from mamba_ssm import Mamba #Using Mamba
 
 from ..mipha.model.language_model.mipha_phi import (MiphaPhiForCausalLM, MiphaPhiModel)
-from ..reason_fusion import ReasonFusion #Setup for Reason fusion
+# from ..reason_fusion import ReasonFusion #Setup for Reason fusion
 from segearth_r2.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, REFER_TOKEN_INDEX
 
 from ..mask_decoder.Mask2Former_Simplify.modeling.transformer_decoder.mask2former_transformer_decoder import MultiScaleMaskedTransformerDecoderForOPTPreTrain
