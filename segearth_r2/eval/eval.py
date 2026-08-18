@@ -194,23 +194,6 @@ def main():
 
     print("---------- Model Initialization Complete ----------")
 
-
-    # --- DETERMINISM CHECK ---
-    not_in_eval = [name for name, module in model.named_modules() if module.training]
-    if not_in_eval:
-        print(f"WARNING: {len(not_in_eval)} submodules still in TRAIN mode:")
-        for n in not_in_eval[:30]:
-            print(f"  - {n}")
-    else:
-        print("All submodules confirmed in eval mode.")
-
-    for name, module in model.named_modules():
-        if isinstance(module, (torch.nn.Dropout, torch.nn.BatchNorm1d,
-                                torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
-            status = "TRAIN (ACTIVE!)" if module.training else "eval"
-            print(f"{name}: {type(module).__name__} -> {status}")
-    # --- END DETERMINISM CHECK (part 1) ---
-
     data_args.is_multimodal = True
     conversation_lib.default_conversation = conversation_lib.conv_templates[data_args.version]
     clip_image_processor = SiglipImageProcessor.from_pretrained(data_args.vision_tower)
@@ -251,53 +234,7 @@ def main():
             pin_memory=False,
             sampler=None,
             collate_fn=data_collator)
-
-        # --- DETERMINISM CHECK (part 2): run one sample twice ---
-        # if split == splits[0]:  # only do this once, on the first split
-        #     sample_inputs = next(iter(eval_dataloader))
-        #     sample_inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in sample_inputs.items()}
-        #     sample_inputs_gpu['token_refer_id'] = [ids.to(device) for ids in sample_inputs['token_refer_id']]
-        if split == splits[0]:
-            sample_inputs = None
-            for candidate in eval_dataloader:
-                if candidate['mask_num'][0] > 0 and len(candidate['seg_info']) > 0:
-                    sample_inputs = candidate
-                    break
-            if sample_inputs is None:
-                    print("No valid (non-empty) sample found for determinism check.")
-            else:
-                    sample_inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in sample_inputs.items()}
-                    sample_inputs_gpu['token_refer_id'] = [ids.to(device) for ids in sample_inputs['token_refer_id']]
-
-            with torch.no_grad():
-                out1 = model.eval_seg(
-                    input_ids=sample_inputs_gpu['input_ids'],
-                    attention_mask=sample_inputs_gpu['attention_mask'],
-                    images=sample_inputs_gpu['images'].to(dtype=torch.float16),
-                    images_clip=sample_inputs_gpu['images_clip'].to(dtype=torch.float16),
-                    seg_info=sample_inputs_gpu['seg_info'],
-                    token_refer_id=sample_inputs_gpu['token_refer_id'],
-                    SEG_token_embedding_indices=sample_inputs_gpu['SEG_token_embedding_indices'],
-                    labels=sample_inputs_gpu['labels'],
-                    mask_num=sample_inputs_gpu['mask_num'],
-                )
-                out2 = model.eval_seg(
-                    input_ids=sample_inputs_gpu['input_ids'],
-                    attention_mask=sample_inputs_gpu['attention_mask'],
-                    images=sample_inputs_gpu['images'].to(dtype=torch.float16),
-                    images_clip=sample_inputs_gpu['images_clip'].to(dtype=torch.float16),
-                    seg_info=sample_inputs_gpu['seg_info'],
-                    token_refer_id=sample_inputs_gpu['token_refer_id'],
-                    SEG_token_embedding_indices=sample_inputs_gpu['SEG_token_embedding_indices'],
-                    labels=sample_inputs_gpu['labels'],
-                    mask_num=sample_inputs_gpu['mask_num'],
-                )
-            pred1, pred2 = out1[0]['pred'], out2[0]['pred']
-            print("Determinism check — identical outputs:", np.array_equal(pred1, pred2))
-            print("Differing pixels:", np.sum(pred1 != pred2), "/", pred1.size)
-        # --- END DETERMINISM CHECK (part 2) ---
-
-
+        
         do_eval(model, eval_dataloader, split, data_args, device)
 
 
@@ -345,10 +282,8 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                 pred_np = output['pred']
                 gt_np = output['gt']
 
-                pred_bin = (pred_np > 0).squeeze() #.astype(np.int64)
-                gt_bin = (gt_np > 0).squeeze() #.astype(np.int64)
-                if pred_bin.ndim != 2 or gt_bin.ndim != 2:
-                    print(f"WARNING: unexpected shape — pred {pred_bin.shape}, gt {gt_bin.shape}, image {seg.get('image_id')}")
+                pred_bin = (pred_np > 0).astype(np.int64).squeeze() 
+                gt_bin = (gt_np > 0).astype(np.int64).squeeze() 
                 pred_t = torch.from_numpy(pred_bin).to(device)
                 gt_t = torch.from_numpy(gt_bin).to(device)
 
@@ -378,7 +313,11 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                         alpha=data_args.overlay_alpha,
                     )
 
+    print(acc_iou_meter)
+    print(intersection_meter)
+    print(union_meter)
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
+    print(iou_class)
     cIoU = iou_class[1]
     gIoU = acc_iou_meter.avg[1]
 
