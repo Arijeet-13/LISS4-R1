@@ -252,10 +252,21 @@ def main():
             collate_fn=data_collator)
 
         # --- DETERMINISM CHECK (part 2): run one sample twice ---
-        if split == splits[0]:  # only do this once, on the first split
-            sample_inputs = next(iter(eval_dataloader))
-            sample_inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in sample_inputs.items()}
-            sample_inputs_gpu['token_refer_id'] = [ids.to(device) for ids in sample_inputs['token_refer_id']]
+        # if split == splits[0]:  # only do this once, on the first split
+        #     sample_inputs = next(iter(eval_dataloader))
+        #     sample_inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in sample_inputs.items()}
+        #     sample_inputs_gpu['token_refer_id'] = [ids.to(device) for ids in sample_inputs['token_refer_id']]
+        if split == splits[0]:
+            sample_inputs = None
+            for candidate in eval_dataloader:
+                if candidate['mask_num'][0] > 0 and len(candidate['seg_info']) > 0:
+                    sample_inputs = candidate
+                    break
+            if sample_inputs is None:
+                    print("No valid (non-empty) sample found for determinism check.")
+            else:
+                    sample_inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in sample_inputs.items()}
+                    sample_inputs_gpu['token_refer_id'] = [ids.to(device) for ids in sample_inputs['token_refer_id']]
 
             with torch.no_grad():
                 out1 = model.eval_seg(
