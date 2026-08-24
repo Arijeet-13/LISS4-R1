@@ -288,7 +288,7 @@ def do_eval(model, eval_dataloader, split, data_args, device):
             for output, seg in zip(outputs, inputs['seg_info']):
                 pred_np = output['pred']
                 gt_np = output['gt']
-
+                print(pred_np.min(), pred_np.max(), pred_np.dtype)
                 pred_bin = (pred_np > 0).astype(np.int64).squeeze() 
                 gt_bin = (gt_np > 0).astype(np.int64).squeeze() 
                 pred_t = torch.from_numpy(pred_bin).to(device)
