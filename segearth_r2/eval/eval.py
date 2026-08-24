@@ -241,6 +241,7 @@ def main():
         
         do_eval(model, eval_dataloader, split, data_args, device)
 
+
 def do_eval(model, eval_dataloader, split, data_args, device):
     model.eval()
 
@@ -258,25 +259,16 @@ def do_eval(model, eval_dataloader, split, data_args, device):
     thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
     pr_meters = {t: AverageMeter(f"Pr@{t}", ":6.3f", Summary.AVERAGE) for t in thresholds}
 
-    # --- NEW: split meters for single- vs multi-instance samples ---
-    single_intersection_meter = AverageMeter("Intersec_single", ":6.3f", Summary.SUM)
-    single_union_meter = AverageMeter("Union_single", ":6.3f", Summary.SUM)
-    single_acc_iou_meter = AverageMeter("gIoU_single", ":6.3f", Summary.SUM)
-
-    multi_intersection_meter = AverageMeter("Intersec_multi", ":6.3f", Summary.SUM)
-    multi_union_meter = AverageMeter("Union_multi", ":6.3f", Summary.SUM)
-    multi_acc_iou_meter = AverageMeter("gIoU_multi", ":6.3f", Summary.SUM)
-    # ------------------------------------------------------------
-
     n_skipped_empty = 0
     with torch.no_grad():
         for idx, inputs in tqdm(enumerate(eval_dataloader), total=len(eval_dataloader)):
             mask_num = inputs['mask_num'][0]
             if mask_num == 0 or len(inputs['seg_info']) == 0:
+                acc_iou_meter.update(np.array([1.0, 1.0]), n=1)
+                for threshold in thresholds:
+                    pr_meters[threshold].update(1.0, n=1)
                 n_skipped_empty += 1
                 continue
-
-            is_single = (mask_num == 1)  # capture once per image, before the inner per-instance loop
 
             inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in inputs.items()}
             inputs_gpu['token_refer_id'] = [ids.to(device) for ids in inputs['token_refer_id']]
@@ -297,8 +289,8 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                 pred_np = output['pred']
                 gt_np = output['gt']
 
-                pred_bin = (pred_np > 0).squeeze()
-                gt_bin = (gt_np > 0).squeeze()
+                pred_bin = (pred_np > 0).astype(np.int64).squeeze() 
+                gt_bin = (gt_np > 0).astype(np.int64).squeeze() 
                 pred_t = torch.from_numpy(pred_bin).to(device)
                 gt_t = torch.from_numpy(gt_bin).to(device)
 
@@ -307,105 +299,25 @@ def do_eval(model, eval_dataloader, split, data_args, device):
                     pred_t, gt_t, ignore_index=data_args.ignore_index
                 )
 
-                # --- NEW: also feed the split meters ---
-                if is_single:
-                    compute_metric(
-                        single_intersection_meter, single_union_meter, single_acc_iou_meter, pr_meters,
-                        pred_t, gt_t, ignore_index=data_args.ignore_index
+                image_id = seg['image_id']
+                mask_id = seg['mask_id']
+
+                if data_args.save_masks:
+                    pred_path = os.path.join(save_dir, f"{image_id}_mask{mask_id}_pred.png")
+                    gt_path = os.path.join(save_dir, f"{image_id}_mask{mask_id}_gt.png")
+                    cv2.imwrite(pred_path, pred_bin.astype(np.uint8) * 255)
+                    cv2.imwrite(gt_path, gt_bin.astype(np.uint8) * 255)
+
+                if data_args.save_overlay:
+                    original_img = _load_original_image(
+                        seg, images_clip_tensor=inputs_gpu['images_clip']
                     )
-                else:
-                    compute_metric(
-                        multi_intersection_meter, multi_union_meter, multi_acc_iou_meter, pr_meters,
-                        pred_t, gt_t, ignore_index=data_args.ignore_index
+                    overlay_path = os.path.join(overlay_dir, f"{image_id}_mask{mask_id}_overlay.png")
+                    save_overlay_visualization(
+                        original_img, pred_bin, overlay_path,
+                        color_bgr=(0, 0, 255),  # red in BGR
+                        alpha=data_args.overlay_alpha,
                     )
-                # ----------------------------------------
-
-                # ... rest of saving masks/overlays unchanged ...
-
-    # --- NEW: print the split comparison ---
-    single_gIoU = single_acc_iou_meter.avg[1] if single_acc_iou_meter.count > 0 else float('nan')
-    multi_gIoU = multi_acc_iou_meter.avg[1] if multi_acc_iou_meter.count > 0 else float('nan')
-    print(f"\n[mask_num == 1]  instances={single_acc_iou_meter.count}  gIoU={single_gIoU:.4f}")
-    print(f"[mask_num > 1]   instances={multi_acc_iou_meter.count}  gIoU={multi_gIoU:.4f}")
-    # ----------------------------------------
-
-#     # ... rest of function unchanged (overall gIoU/cIoU printing) ...
-# def do_eval(model, eval_dataloader, split, data_args, device):
-#     model.eval()
-
-#     save_dir = os.path.join(data_args.output_dir, split)
-#     if data_args.save_masks:
-#         os.makedirs(save_dir, exist_ok=True)
-
-#     overlay_dir = os.path.join(data_args.output_dir, split, "overlays")
-#     if data_args.save_overlay:
-#         os.makedirs(overlay_dir, exist_ok=True)
-
-#     intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
-#     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
-#     acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
-#     thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
-#     pr_meters = {t: AverageMeter(f"Pr@{t}", ":6.3f", Summary.AVERAGE) for t in thresholds}
-
-#     n_skipped_empty = 0
-#     with torch.no_grad():
-#         for idx, inputs in tqdm(enumerate(eval_dataloader), total=len(eval_dataloader)):
-#             mask_num = inputs['mask_num'][0]
-#             if mask_num == 0 or len(inputs['seg_info']) == 0:
-#                 acc_iou_meter.update(np.array([1.0, 1.0]), n=1)
-#                 for threshold in thresholds:
-#                     pr_meters[threshold].update(1.0, n=1)
-#                 n_skipped_empty += 1
-#                 continue
-
-#             inputs_gpu = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in inputs.items()}
-#             inputs_gpu['token_refer_id'] = [ids.to(device) for ids in inputs['token_refer_id']]
-
-#             outputs = model.eval_seg(
-#                 input_ids=inputs_gpu['input_ids'],
-#                 attention_mask=inputs_gpu['attention_mask'],
-#                 images=inputs_gpu['images'].to(dtype=torch.float16),
-#                 images_clip=inputs_gpu['images_clip'].to(dtype=torch.float16),
-#                 seg_info=inputs_gpu['seg_info'],
-#                 token_refer_id=inputs_gpu['token_refer_id'],
-#                 SEG_token_embedding_indices=inputs_gpu['SEG_token_embedding_indices'],
-#                 labels=inputs_gpu['labels'],
-#                 mask_num=inputs_gpu['mask_num'],
-#             )
-
-#             for output, seg in zip(outputs, inputs['seg_info']):
-#                 pred_np = output['pred']
-#                 gt_np = output['gt']
-
-#                 pred_bin = (pred_np > 0).astype(np.int64).squeeze() 
-#                 gt_bin = (gt_np > 0).astype(np.int64).squeeze() 
-#                 pred_t = torch.from_numpy(pred_bin).to(device)
-#                 gt_t = torch.from_numpy(gt_bin).to(device)
-
-#                 compute_metric(
-#                     intersection_meter, union_meter, acc_iou_meter, pr_meters,
-#                     pred_t, gt_t, ignore_index=data_args.ignore_index
-#                 )
-
-                # image_id = seg['image_id']
-                # mask_id = seg['mask_id']
-
-                # if data_args.save_masks:
-                #     pred_path = os.path.join(save_dir, f"{image_id}_mask{mask_id}_pred.png")
-                #     gt_path = os.path.join(save_dir, f"{image_id}_mask{mask_id}_gt.png")
-                #     cv2.imwrite(pred_path, pred_bin.astype(np.uint8) * 255)
-                #     cv2.imwrite(gt_path, gt_bin.astype(np.uint8) * 255)
-
-                # if data_args.save_overlay:
-                #     original_img = _load_original_image(
-                #         seg, images_clip_tensor=inputs_gpu['images_clip']
-                #     )
-                #     overlay_path = os.path.join(overlay_dir, f"{image_id}_mask{mask_id}_overlay.png")
-                #     save_overlay_visualization(
-                #         original_img, pred_bin, overlay_path,
-                #         color_bgr=(0, 0, 255),  # red in BGR
-                #         alpha=data_args.overlay_alpha,
-                #     )
 
     print(acc_iou_meter.avg)
     print(intersection_meter.sum)
