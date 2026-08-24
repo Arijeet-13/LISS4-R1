@@ -205,6 +205,9 @@ def make_unify_datamodule(clip_image_processor, tokenizer, data_args, training_a
     elif data_args.dataset_type == 'RRSISD': #Added RRSISD Setup
             RRSISDTrainDataset = RRSISDDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args)
             datasets += [RRSISDTrainDataset] * data_ratio[0]
+    elif data_args.dataset_type == 'RISBench': #Added RISBench Setup
+                RISBenchDataset = RISBenchDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args)
+                datasets += [RISBenchDataset] * data_ratio[0]
     else:
         if data_ratio[0] != 0:
             LaSeRSTrainDataset = LaSeRSDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args)

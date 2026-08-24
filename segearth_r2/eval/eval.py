@@ -18,7 +18,7 @@ import zipfile
 
 from segearth_r2.utils import conversation as conversation_lib
 from segearth_r2.utils.builder import load_pretrained_model
-from segearth_r2.datasets.dataset import DataCollatorForCOCODatasetV2, LaSeRSDataset, EarthReasonDataset, RefSegRSDataset, RRSISDDataset, LISS4ReasonDataset
+from segearth_r2.datasets.dataset import DataCollatorForCOCODatasetV2, LaSeRSDataset, EarthReasonDataset, RefSegRSDataset, RRSISDDataset, LISS4ReasonDataset, RISBenchDataset
 
 class Summary(Enum):
     NONE = 0
@@ -211,6 +211,8 @@ def main():
         splits = [data_args.data_split]
     elif data_args.dataset_type == 'LISS4Reason':
         splits = [data_args.data_split]
+    elif data_args.dataset_type == 'RISBench':
+        splits = [data_args.data_split]
     else:
         raise ValueError(f"Unknown dataset_type: {data_args.dataset_type!r} (expected 'LaSeRS', 'EarthReason', 'RefSegRS', 'LISS4Reason' or 'RRSISD')")
         # save_folder = data_args.output_dir
@@ -223,6 +225,8 @@ def main():
             eval_dataset = RRSISDDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args, split=split)
         elif data_args.dataset_type == 'LISS4Reason': #LISS4
             eval_dataset = LISS4ReasonDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args, split=split)
+        elif data_args.dataset_type == 'RISBench': #LISS4
+            eval_dataset = RISBenchDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args, split=split)
         else:  # 'EarthReason'
             eval_dataset = EarthReasonDataset(base_data_path=data_args.base_data_path, tokenizer=tokenizer, data_args=data_args, split=split)
 

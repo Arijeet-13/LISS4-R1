@@ -576,6 +576,165 @@ class RRSISDDataset(RS_Base_Dataset):
         data_dict['mask_num'] = mask_num
 
         return data_dict
+    
+class RISBenchDataset(RS_Base_Dataset):
+    def preprocess_referring_instruction(self, instruction, REFER_token='[SEG]'):
+        tokenized = self.tokenizer.encode(instruction, add_special_tokens=False)
+        REFER_token_id = [self.tokenizer.encode(REFER_token, add_special_tokens=False)[0]]
+        tokenized = tokenized + REFER_token_id
+        return torch.tensor(tokenized)
+
+    def __init__(self, base_data_path, tokenizer, data_args, split='train'):
+        self.pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
+        self.pixel_std  = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
+
+        self.base_data_path = base_data_path
+        self.tokenizer = tokenizer
+        self.data_args = data_args
+        self.split = split
+
+        from datasets import Dataset as HFDataset, concatenate_datasets
+        split_dir_map = {
+            'train': 'train',
+            'val': 'validation',
+            'validation': 'validation',
+            'test': 'test',
+        }
+        split_dir = split_dir_map.get(split.lower(), split)
+        split_path = os.path.join(base_data_path, split_dir)
+
+        if not os.path.isdir(split_path):
+            raise FileNotFoundError(
+                f"RISBench split directory does not exist: {split_path}"
+            )
+
+        arrow_files = sorted(glob.glob(os.path.join(split_path, "data-*.arrow")))
+        if len(arrow_files) == 0:
+            raise FileNotFoundError(f"No Arrow files found in {split_path}")
+
+        print(f"[RISBenchDataset] Found {len(arrow_files)} Arrow shards in {split_path}.")
+
+        datasets = [HFDataset.from_file(f) for f in arrow_files]
+        self.risbench = concatenate_datasets(datasets)
+
+        required_columns = {"image", "mask", "phrase"}
+        missing_columns = required_columns - set(self.risbench.column_names)
+        if missing_columns:
+            raise ValueError(
+                f"RISBench is missing columns: {missing_columns}. "
+                f"Found: {self.risbench.column_names}"
+            )
+
+        self.SEG_token_id = self.tokenizer.convert_tokens_to_ids("[SEG]")
+        self._img_cache_dir = os.path.join(base_data_path, ".risbench_cache", split_dir)
+        os.makedirs(self._img_cache_dir, exist_ok=True)
+
+        print(f"[RISBenchDataset] {len(self.risbench)} samples found ({split_dir}).")
+
+    def __len__(self):
+        return len(self.risbench)
+
+    def __getitem__(self, idx):
+        sample = self.risbench[idx]
+        image_pil = sample["image"]          # PIL Image
+        mask_pil  = sample["mask"]           # PIL Image
+        ref       = sample["phrase"]         # str
+
+        if image_pil.mode != "RGB":
+            image_pil = image_pil.convert("RGB")
+        if mask_pil.mode != "L":
+            mask_pil = mask_pil.convert("L")
+
+        w, h = image_pil.size
+        image_height = h
+        image_width  = w
+
+        img_cache_path = os.path.join(self._img_cache_dir, f"{idx}.jpg")
+        if not os.path.exists(img_cache_path):
+            image_pil.save(img_cache_path)
+
+        mask_np = np.array(mask_pil)
+        mask_np = (mask_np > 0).astype(np.uint8)
+        masks   = np.expand_dims(mask_np, axis=0)
+
+        size  = 1024.0
+        scale = size / min(h, w)
+        if h < w:
+            newh, neww = size, scale * w
+        else:
+            newh, neww = scale * h, size
+        if max(newh, neww) > 1024:
+            scale = 1024.0 / max(newh, neww)
+            newh *= scale
+            neww *= scale
+        neww = int(neww + 0.5)
+        newh = int(newh + 0.5)
+
+        image_resized = image_pil.resize((neww, newh), resample=Image.BILINEAR)
+        image_np = np.array(image_resized)
+
+        if neww < 1024:
+            padding = ((0, 0), (0, 1024 - neww), (0, 0))
+        else:
+            padding = ((0, 1024 - newh), (0, 0), (0, 0))
+        image_padded = np.pad(image_np, padding, mode="constant", constant_values=128.0)
+
+        image_tensor = torch.as_tensor(
+            np.ascontiguousarray(image_padded.transpose(2, 0, 1))
+        ).float()                                            # (3, 1024, 1024)
+
+        data_dict = {}
+        data_dict["file_name"]  = img_cache_path
+        data_dict["height"]     = image_height
+        data_dict["width"]      = image_width
+        data_dict["image_id"]   = idx
+        data_dict["image"]      = (image_tensor - self.pixel_mean) / self.pixel_std
+
+        data_id  = f"risbench_{idx}"
+        answer   = "Sure, it is [SEG]. "
+        mask_num = 1
+
+        data_dict["annotations"] = [{
+            "data_id":    data_id,
+            "mask_id":    0,
+            "mask":       np.expand_dims(masks[0], axis=0),  # (1, H, W)
+            "image_path": img_cache_path,
+            "height":     image_height,
+            "width":      image_width,
+            "image_id":   data_id,
+            "instruction": ref,
+        }]
+
+        prefix_inst = (
+            "This is an image \n<image>\n, please doing Referring Segmentation "
+            "according to the following instruction:"
+        )
+        instruction = ref.strip()
+        token_refer_id = self.preprocess_referring_instruction(instruction)
+
+        sources = [[
+            {"from": "human", "value": prefix_inst + "\n<refer> <|assistant|>"},
+            {"from": "gpt",   "value": "\n" + answer},
+        ]]
+
+        text_dict = self.preprocess_llama2(sources, self.tokenizer)
+        input_ids = text_dict["input_ids"][0]
+
+        SEG_token_embedding_indices = torch.zeros_like(input_ids)
+        SEG_token_embedding_indices[input_ids == self.SEG_token_id] = 1
+
+        refer_embedding_indices = torch.zeros_like(input_ids)
+        refer_embedding_indices[input_ids == REFER_TOKEN_INDEX] = 1
+
+        data_dict["input_ids"]                  = input_ids
+        data_dict["labels"]                     = text_dict["labels"][0]
+        data_dict["dataset_type"]               = "rs_refer_seg"
+        data_dict["token_refer_id"]             = token_refer_id
+        data_dict["refer_embedding_indices"]    = refer_embedding_indices
+        data_dict["SEG_token_embedding_indices"] = SEG_token_embedding_indices
+        data_dict["mask_num"]                   = mask_num
+
+        return data_dict
 
 class EarthReasonDataset(RS_Base_Dataset):
 
