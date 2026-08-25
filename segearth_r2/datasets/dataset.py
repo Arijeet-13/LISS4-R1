@@ -838,9 +838,36 @@ class EarthReasonDataset(RS_Base_Dataset):
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         if mask is not None:
             mask[mask != 0] = 1
+    
+    # --- Resize mask same as preprocess_image ---
+            h, w = mask.shape[:2]
+            scale = 1024.0 / min(h, w)
+            if h < w:
+                newh, neww = 1024.0, scale * w
+            else:
+                newh, neww = scale * h, 1024.0
+            if max(newh, neww) > 1024:
+                s = 1024.0 / max(newh, neww)
+                newh, neww = newh * s, neww * s
+            neww = int(neww + 0.5)
+            newh = int(newh + 0.5)
+            mask = cv2.resize(mask, (neww, newh), interpolation=cv2.INTER_NEAREST)
+            if neww < 1024:
+                mask = np.pad(mask, ((0, 0), (0, 1024 - neww)), mode='constant', constant_values=0)
+            else:
+                mask = np.pad(mask, ((0, 1024 - newh), (0, 0)), mode='constant', constant_values=0)
+    # --- End resize ---
+    
             masks = np.expand_dims(mask, axis=0)
         else:
             masks = None
+
+        # mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+        # if mask is not None:
+        #     mask[mask != 0] = 1
+        #     masks = np.expand_dims(mask, axis=0)
+        # else:
+        #     masks = None
 
         data_dict = {}
         data_dict['file_name'] = image_path
