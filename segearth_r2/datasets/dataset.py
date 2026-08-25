@@ -614,8 +614,8 @@ class RISBenchDataset(RS_Base_Dataset):
 
         print(f"[RISBenchDataset] Found {len(arrow_files)} Arrow shards in {split_path}.")
 
-        datasets = [HFDataset.from_file(f) for f in arrow_files]
-        self.risbench = concatenate_datasets(datasets)
+        hf_datasets = [HFDataset.from_file(f) for f in arrow_files]
+        self.risbench = concatenate_datasets(hf_datasets)
 
         required_columns = {"image", "mask", "phrase"}
         missing_columns = required_columns - set(self.risbench.column_names)
