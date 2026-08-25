@@ -1112,18 +1112,39 @@ class SegEarthR2(MiphaPhiForCausalLM):
             if gt_mask is not None:
                 if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
                     gt_mask = gt_mask[0]
-                print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
-                gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
-                gt_mask = F.interpolate(
-                    gt_mask,
-                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-                    mode="bilinear",
-                    align_corners=False,
+                orig_h = _seg_info['height']
+                orig_w = _seg_info['width']
+                scale = 1024.0 / min(orig_h, orig_w)
+                if orig_h < orig_w:
+                    newh, neww = 1024.0, scale * orig_w
+                else:
+                    newh, neww = scale * orig_h, 1024.0
+                if max(newh, neww) > 1024:
+                    s = 1024.0 / max(newh, neww)
+                    newh, neww = newh * s, neww * s
+                newh, neww = int(newh + 0.5), int(neww + 0.5)
+                pred_processed = sem_seg_postprocess(
+                    mask_pred_result,       # (1, 1024, 1024)
+                    img_size=(newh, neww),   # pre-padded dims → crops padding
+                    output_height=orig_h,
+                    output_width=orig_w
                 )
+                print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
+                # gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
+                gt_mask_t = torch.as_tensor(
+                    gt_mask, dtype=pred_processed.dtype,
+                    device=pred_processed.device
+                )
+                # gt_mask = F.interpolate(
+                #     gt_mask,
+                #     size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                #     mode="bilinear",
+                #     align_corners=False,
+                # )
             
             instance_r = {
-                'pred': ((mask_pred_result.cpu().numpy() > 0) * 255).astype(np.uint8),
-                'gt': ((gt_mask.cpu().numpy() > 0) * 255).astype(np.uint8),
+                'pred': ((pred_processed.cpu().numpy() > 0) * 255).astype(np.uint8),
+                'gt': ((gt_mask_t.cpu().numpy() > 0) * 255).astype(np.uint8),
                 'image_name': _seg_info['image_id'],
                 'id': _seg_info['data_id'],
                 'mask_id': _seg_info['mask_id'],
