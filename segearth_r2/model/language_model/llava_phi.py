@@ -13,8 +13,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutpu
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.utils.memory import retry_if_cuda_oom
 from mamba_ssm import Mamba #Using Mamba
+
 from ..mipha.model.language_model.mipha_phi import (MiphaPhiForCausalLM, MiphaPhiModel)
-#from ..reason_fusion import ReasonFusion
+# from ..reason_fusion import ReasonFusion #Setup for Reason fusion
 from segearth_r2.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, REFER_TOKEN_INDEX
 
 from ..mask_decoder.Mask2Former_Simplify.modeling.transformer_decoder.mask2former_transformer_decoder import MultiScaleMaskedTransformerDecoderForOPTPreTrain
@@ -84,142 +85,87 @@ class CrossAttentionBlock(nn.Module):
         return out
 
 
-class ReasonFusion(nn.Module):
+class ReasonFusion(nn.Module): #Setup for Reason Fusion
+    """
+    Inputs
+    -------
+    reason_token : [B,1,C]
+
+    multi_scale_features :
+        list([B,C,H,W], ...)
+
+    Outputs
+    --------
+    refined_reason
+    refined_features
+    """
+
     def __init__(self, dim=256, heads=8):
+
         super().__init__()
 
         self.reason_update = CrossAttentionBlock(dim, heads)
+
         self.visual_update = CrossAttentionBlock(dim, heads)
-
-        # Learnable residual strengths
-        self.reason_gate = nn.Parameter(torch.tensor(-2.0))
-        self.visual_gate = nn.Parameter(torch.tensor(-2.0))
-
-        self.reason_norm = nn.LayerNorm(dim)
-        self.visual_norm = nn.LayerNorm(dim)
+        
+        self.reason_gate = nn.Parameter(torch.tensor(0.5))
+        self.visual_gate = nn.Parameter(torch.tensor(0.5)) 
 
     def forward(self, reason_token, features):
 
         refined_features = []
-        reason = reason_token
 
-        # Convert to [0, 1]
-        reason_gate = torch.sigmoid(self.reason_gate)
-        visual_gate = torch.sigmoid(self.visual_gate)
+        reason = reason_token
 
         for feat in features:
 
-            B, C, H, W = feat.shape
+            b, c, h, w = feat.shape
 
             visual = feat.flatten(2).transpose(1, 2)
 
-            # =========================
-            # Visual -> Reason
-            # =========================
-            reason_delta = self.reason_update(
-                self.reason_norm(reason),
-                self.visual_norm(visual)
-            )
+            reason_new = self.reason_update(reason, visual)
 
-            reason = reason + reason_gate * reason_delta
+            reason = reason + self.reason_gate * reason_new
 
-            # =========================
-            # Reason -> Visual
-            # =========================
-            visual_delta = self.visual_update(
-                self.visual_norm(visual),
-                self.reason_norm(reason)
-            )
+            visual_new = self.visual_update(visual, reason)
 
-            visual = visual + visual_gate * visual_delta
+            visual = visual + self.visual_gate * visual_new
 
-            # Back to [B,C,H,W]
-            visual = visual.transpose(1, 2).reshape(
-                B, C, H, W
-            )
+            visual = visual.transpose(1, 2).reshape(b, c, h, w)
 
             refined_features.append(visual)
 
         return reason, refined_features
         
-class MambaOnlyRefiner(nn.Module):
+        
+class MambaSpatialRefiner(nn.Module): #MambaSpatialRefiner
     def __init__(self, channels, d_state=16, d_conv=4, expand=2):
         super().__init__()
-
         self.norm = nn.LayerNorm(channels)
-
-        self.mamba_fwd = Mamba(
-            d_model=channels,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand
-        )
-
-        self.mamba_bwd = Mamba(
-            d_model=channels,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand
-        )
-
-        self.direction_weights = nn.Parameter(
-            torch.zeros(2)
-        )
-
-        self.out_proj = nn.Conv2d(
-            channels * 2,
-            channels,
-            kernel_size=1
-        )
-
+        self.mamba_fwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mamba_bwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.out_proj = nn.Conv2d(channels * 2, channels, kernel_size=1)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
-
-        self.residual_gate = nn.Parameter(
-            torch.tensor(-2.0)
-        )
-
+        #self.alpha_fwd = nn.Parameter(torch.tensor(0.5))
+        #self.alpha_bwd = nn.Parameter(torch.tensor(0.5))
+        self.direction_weights = nn.Parameter(torch.zeros(2))
+        self.residual_gate = nn.Parameter(torch.tensor(0.5))
     def forward(self, x):
-
         B, C, H, W = x.shape
-
         seq = x.flatten(2).transpose(1, 2)
-        seq = self.norm(seq)
-
-        fwd = self.mamba_fwd(seq)
-
-        bwd = self.mamba_bwd(
-            seq.flip(dims=[1])
-        ).flip(dims=[1])
-
-        weights = torch.softmax(
-            self.direction_weights,
-            dim=0
-        )
-
-        fwd = weights[0] * fwd
+        seq_n = self.norm(seq)
+        fwd = self.mamba_fwd(seq_n)
+        weights = torch.softmax(self.direction_weights, dim=0)
+        bwd = self.mamba_bwd(seq_n.flip(dims=[1])).flip(dims=[1])
+        fwd = weights[0]* fwd
         bwd = weights[1] * bwd
 
-        merged = torch.cat(
-            [fwd, bwd],
-            dim=-1
-        )
+        merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
+        #merged = torch.cat([fwd, bwd], dim=-1).transpose(1, 2).reshape(B, 2 * C, H, W)
+        gate = torch.sigmoid(self.residual_gate)
+        return x + gate*self.out_proj(merged)
 
-        merged = merged.transpose(1, 2).reshape(
-            B, 2 * C, H, W
-        )
-
-        out = self.out_proj(merged)
-
-        gate = torch.sigmoid(
-            self.residual_gate
-        )
-
-        return x + gate * out        
-
-
-
-        
 class AttentionLoss(nn.Module):
     def __init__(self, reduction='batchmean'):
         super(AttentionLoss, self).__init__()
@@ -325,14 +271,14 @@ class SegEarthR2Model(MiphaPhiModel):
 class SegEarthR2(MiphaPhiForCausalLM):
     def __init__(self, config, model_args=None, mask_decoder_cfg=None, add_cross_attn=True, cross_attn_index=None):
         super(SegEarthR2, self).__init__(config)
-        print("-----------------------------------------Test-Print*v5*--------------------------------------")
+
         self.model = SegEarthR2Model(config, mask_decoder_cfg)
         self.init_config = config
         self.mask_decoder_cfg = mask_decoder_cfg
         self.cross_attn_index = cross_attn_index
 
         self.lm_head = nn.Linear(config.hidden_size, 51200, bias=False)
-        self.reason_fusion = ReasonFusion(
+        self.reason_fusion = ReasonFusion( #Reson Fusion setup
     dim=256,
     
         )
@@ -370,8 +316,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
         self.post_init()
 
     def refine_with_mamba(self, mask_features, multi_scale_features): #Added Mamba
-        mask_features = self.mamba_mask_refiner(mask_features)
-        #multi_scale_features = [self.mamba_refiner(feat) for feat in multi_scale_features]
+        multi_scale_features = [self.mamba_refiner(feat) for feat in multi_scale_features]
         return mask_features, multi_scale_features
 
     def initial_mask_module(self, pretrained_path=None, model_args=None):
@@ -386,14 +331,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
         self.pixel_decoder = self.pixel_decoder_init(cfg=self.mask_decoder_cfg, input_shape=input_shape)
         self.predictor = self.predictor_init(cfg=self.mask_decoder_cfg)
 
-        #self.mamba_refiner = MambaOnlyRefiner(  # Added Mamba 
-        #    channels=self.mask_decoder_cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM  # 256
-        #)
-        
-        
-        self.mamba_mask_refiner = MambaOnlyRefiner(
-    channels=self.mask_decoder_cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
+        self.mamba_refiner = MambaSpatialRefiner(  # Added Mamba
+            channels=self.mask_decoder_cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM  # 256
         )
+
         #if self.language_mamba_fwd is None:
 
         '''self.language_norm = nn.LayerNorm(self.config.hidden_size)
@@ -964,7 +905,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
             ]
 
 
-            SEG_embedding, multi_scale_features = self.reason_fusion(
+            SEG_embedding, multi_scale_features = self.reason_fusion( #Reson Fusion setup
     SEG_embedding,
     multi_scale_features
             )
@@ -1148,7 +1089,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
             for feat in multi_scale_features
         ]
 
-        SEG_embedding, multi_scale_features = self.reason_fusion(
+        SEG_embedding, multi_scale_features = self.reason_fusion( #Reson fusion setup
     SEG_embedding,
     multi_scale_features
         )
@@ -1171,6 +1112,7 @@ class SegEarthR2(MiphaPhiForCausalLM):
             if gt_mask is not None:
                 if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
                     gt_mask = gt_mask[0]
+                print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
                 gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
                 gt_mask = F.interpolate(
                     gt_mask,
@@ -1189,6 +1131,30 @@ class SegEarthR2(MiphaPhiForCausalLM):
             processed_results.append(instance_r)
 
         return processed_results
+#         mask_pred_results = mask_outputs["pred_masks"]
+#         images = ImageList.from_tensors(images, self.size_divisibility)
+# # No longer resizing predictions to the padded canvas here —
+# # resize per-sample to each GT's native size instead, below.
+
+#         processed_results = []
+#         for _seg_info, mask_pred_result in zip(seg_info, mask_pred_results):
+#             gt_mask = _seg_info['mask']
+#             if gt_mask is not None:
+#                 if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
+#                     gt_mask = gt_mask[0]
+#                 gt_mask_t = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device)
+#                 native_h, native_w = gt_mask_t.shape[-2], gt_mask_t.shape[-1]
+
+#         # Resize PREDICTION down to GT's native resolution — GT is never resized
+#                 pred_native = F.interpolate(mask_pred_result.unsqueeze(0), size=(native_h, native_w), mode="bilinear", align_corners=False,).squeeze(0)
+#             else:
+#                 pred_native = mask_pred_result
+#                 gt_mask_t = None
+
+#         instance_r = { 'pred': ((pred_native.cpu().numpy() > 0) * 255).astype(np.uint8), 'gt': ((gt_mask_t.cpu().numpy() > 0) * 255).astype(np.uint8) if gt_mask_t is not None else None, 'image_name': _seg_info['image_id'], 'id': _seg_info['data_id'], 'mask_id': _seg_info['mask_id'], }
+#         processed_results.append(instance_r)
+
+#         return processed_results
 
     def inference(
             self,
