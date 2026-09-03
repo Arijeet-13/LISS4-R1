@@ -29,35 +29,35 @@ from segearth_r2.train.refer import REFER
 warnings.filterwarnings('ignore')
 local_rank = None
 
-def preprocess_mask(mask, image_size):
+def preprocess_mask(mask, image_size=1024, pad_value=0):
     if len(mask.shape) == 2:
         mask = np.expand_dims(mask, axis=0)
     bs, h, w = mask.shape
+
+    size = image_size * 1.0
+    scale = size / min(h, w)
+    if h < w:
+        newh, neww = size, scale * w
+    else:
+        newh, neww = scale * h, size
+    if max(newh, neww) > image_size:
+        s = image_size * 1.0 / max(newh, neww)
+        newh, neww = newh * s, neww * s
+    neww = int(neww + 0.5)
+    newh = int(newh + 0.5)
+
     processed_masks = []
     for i in range(bs):
-        single_mask = mask[i]
-        hh, ww = single_mask.shape[:2]
-        if ww > hh:
-            new_w = image_size
-            new_h = int(hh * (image_size / ww))
+        resized = cv2.resize(mask[i], (neww, newh), interpolation=cv2.INTER_NEAREST)
+        if neww < image_size:
+            padded = np.pad(resized, ((0, 0), (0, image_size - neww)),
+                             mode='constant', constant_values=pad_value)
         else:
-            new_h = image_size
-            new_w = int(ww * (image_size / hh))
-        resized_mask = cv2.resize(single_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            padded = np.pad(resized, ((0, image_size - newh), (0, 0)),
+                             mode='constant', constant_values=pad_value)
+        processed_masks.append(padded)
 
-        pad_h = image_size - new_h
-        pad_w = image_size - new_w
-        top = pad_h // 2
-        bottom = pad_h - top
-        left = pad_w // 2
-        right = pad_w - left
-
-        padded_mask = cv2.copyMakeBorder(resized_mask, top, bottom, left, right, 
-                                         cv2.BORDER_CONSTANT, value=0)
-        processed_masks.append(padded_mask)
-    processed_masks = np.stack(processed_masks, axis=0)
-    
-    return processed_masks
+    return np.stack(processed_masks, axis=0)
 
 def preprocess_image(image_path, pad_value = 128.0, short_edge_length = 1024, max_size = 1024):
     img = Image.open(image_path)
@@ -92,6 +92,37 @@ def preprocess_image(image_path, pad_value = 128.0, short_edge_length = 1024, ma
     ) # (1024, 1024, 3)
     
     return img_padded
+
+# def preprocess_mask(mask, image_size): #Old
+#     if len(mask.shape) == 2:
+#         mask = np.expand_dims(mask, axis=0)
+#     bs, h, w = mask.shape
+#     processed_masks = []
+#     for i in range(bs):
+#         single_mask = mask[i]
+#         hh, ww = single_mask.shape[:2]
+#         if ww > hh:
+#             new_w = image_size
+#             new_h = int(hh * (image_size / ww))
+#         else:
+#             new_h = image_size
+#             new_w = int(ww * (image_size / hh))
+#         resized_mask = cv2.resize(single_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+#         pad_h = image_size - new_h
+#         pad_w = image_size - new_w
+#         top = pad_h // 2
+#         bottom = pad_h - top
+#         left = pad_w // 2
+#         right = pad_w - left
+
+#         padded_mask = cv2.copyMakeBorder(resized_mask, top, bottom, left, right, 
+#                                          cv2.BORDER_CONSTANT, value=0)
+#         processed_masks.append(padded_mask)
+#     processed_masks = np.stack(processed_masks, axis=0)
+    
+#     return processed_masks
+
 
 class RS_Base_Dataset(Dataset):
     
@@ -391,7 +422,8 @@ class RefSegRSDataset(RS_Base_Dataset):
 
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         mask[mask == 255] = 1
-        masks = np.expand_dims(mask, axis=0)
+        # masks = np.expand_dims(mask, axis=0) Changed
+        masks = preprocess_mask(mask, image_size=1024)
 
         answer = 'Sure, it is [SEG]. '
         mask_num = 1
@@ -529,10 +561,11 @@ class RRSISDDataset(RS_Base_Dataset):
         image_tensor = torch.as_tensor(np.ascontiguousarray(image_RGB.transpose(2, 0, 1))).float()
         data_dict['image'] = (image_tensor - self.pixel_mean) / self.pixel_std
 
-        if len(mask.shape) == 2:
-            masks = np.expand_dims(mask, axis=0)
-        else:
-            masks = mask
+        # if len(mask.shape) == 2:
+        #     masks = np.expand_dims(mask, axis=0)
+        # else:
+        #     masks = mask
+        masks = preprocess_mask(mask, image_size=1024)
 
         answer = 'Sure, it is [SEG]. '
         mask_num = 1
@@ -655,7 +688,8 @@ class RISBenchDataset(RS_Base_Dataset):
 
         mask_np = np.array(mask_pil)
         mask_np = (mask_np > 0).astype(np.uint8)
-        masks   = np.expand_dims(mask_np, axis=0)
+        # masks   = np.expand_dims(mask_np, axis=0)
+        masks = preprocess_mask(mask_np, image_size=1024)
 
         size  = 1024.0
         scale = size / min(h, w)
@@ -838,27 +872,7 @@ class EarthReasonDataset(RS_Base_Dataset):
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         if mask is not None:
             mask[mask != 0] = 1
-    
-    # Changes for mask issue
-            h, w = mask.shape[:2]
-            scale = 1024.0 / min(h, w)
-            if h < w:
-                newh, neww = 1024.0, scale * w
-            else:
-                newh, neww = scale * h, 1024.0
-            if max(newh, neww) > 1024:
-                s = 1024.0 / max(newh, neww)
-                newh, neww = newh * s, neww * s
-            neww = int(neww + 0.5)
-            newh = int(newh + 0.5)
-            mask = cv2.resize(mask, (neww, newh), interpolation=cv2.INTER_NEAREST)
-            if neww < 1024:
-                mask = np.pad(mask, ((0, 0), (0, 1024 - neww)), mode='constant', constant_values=0)
-            else:
-                mask = np.pad(mask, ((0, 1024 - newh), (0, 0)), mode='constant', constant_values=0)
-    # Till here changes
-    
-            masks = np.expand_dims(mask, axis=0)
+            masks = preprocess_mask(mask, image_size=1024)
         else:
             masks = None
 
@@ -1007,7 +1021,8 @@ class LISS4ReasonDataset(RS_Base_Dataset):
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         if mask is not None:
             mask[mask != 0] = 1
-            masks = np.expand_dims(mask, axis=0)
+            # masks = np.expand_dims(mask, axis=0)
+            masks = preprocess_mask(mask, image_size=1024)
         else:
             masks = None
 
