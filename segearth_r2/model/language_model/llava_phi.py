@@ -278,10 +278,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
         self.cross_attn_index = cross_attn_index
 
         self.lm_head = nn.Linear(config.hidden_size, 51200, bias=False)
-        self.reason_fusion = ReasonFusion( #Reson Fusion setup
-    dim=256,
+    #     self.reason_fusion = ReasonFusion( #Reson Fusion setup
+    # dim=256,
     
-        )
+    #     )
         
         '''self.language_norm = None
         self.language_mamba_fwd = None
@@ -905,10 +905,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
             ]
 
 
-            SEG_embedding, multi_scale_features = self.reason_fusion( #Reson Fusion setup
-    SEG_embedding,
-    multi_scale_features
-            )
+    #         SEG_embedding, multi_scale_features = self.reason_fusion( #Reson Fusion setup
+    # SEG_embedding,
+    # multi_scale_features
+    #         )
 
             mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding)
 
@@ -1089,10 +1089,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
             for feat in multi_scale_features
         ]
 
-        SEG_embedding, multi_scale_features = self.reason_fusion( #Reson fusion setup
-    SEG_embedding,
-    multi_scale_features
-        )
+    #     SEG_embedding, multi_scale_features = self.reason_fusion( #Reson fusion setup
+    # SEG_embedding,
+    # multi_scale_features
+    #     )
 
         mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
 
@@ -1219,10 +1219,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
                 torch.repeat_interleave(feat, repeats=mask_num, dim=0)
                 for feat in multi_scale_features
             ]
-            SEG_embedding, multi_scale_features = self.reason_fusion(
-    SEG_embedding,
-    multi_scale_features
-            )
+    #         SEG_embedding, multi_scale_features = self.reason_fusion(
+    # SEG_embedding,
+    # multi_scale_features
+    #         )
             mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
 
             mask_pred_results = mask_outputs["pred_masks"]
