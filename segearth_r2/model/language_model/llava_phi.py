@@ -278,10 +278,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
         self.cross_attn_index = cross_attn_index
 
         self.lm_head = nn.Linear(config.hidden_size, 51200, bias=False)
-    #     self.reason_fusion = ReasonFusion( #Reson Fusion setup
-    # dim=256,
+        self.reason_fusion = ReasonFusion( #Reson Fusion setup
+    dim=256,
     
-    #     )
+        )
         
         '''self.language_norm = None
         self.language_mamba_fwd = None
@@ -905,10 +905,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
             ]
 
 
-    #         SEG_embedding, multi_scale_features = self.reason_fusion( #Reson Fusion setup
-    # SEG_embedding,
-    # multi_scale_features
-    #         )
+            SEG_embedding, multi_scale_features = self.reason_fusion( #Reson Fusion setup
+    SEG_embedding,
+    multi_scale_features
+            )
 
             mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding)
 
@@ -1089,10 +1089,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
             for feat in multi_scale_features
         ]
 
-    #     SEG_embedding, multi_scale_features = self.reason_fusion( #Reson fusion setup
-    # SEG_embedding,
-    # multi_scale_features
-    #     )
+        SEG_embedding, multi_scale_features = self.reason_fusion( #Reson fusion setup
+    SEG_embedding,
+    multi_scale_features
+        )
 
         mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
 
@@ -1145,14 +1145,15 @@ class SegEarthR2(MiphaPhiForCausalLM):
 #                 gt_mask_t = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device)
 #                 native_h, native_w = gt_mask_t.shape[-2], gt_mask_t.shape[-1]
 
-#         # Resize PREDICTION down to GT's native resolution — GT is never resized
+#                 # Resize PREDICTION down to GT's native resolution — GT is never resized
 #                 pred_native = F.interpolate(mask_pred_result.unsqueeze(0), size=(native_h, native_w), mode="bilinear", align_corners=False,).squeeze(0)
 #             else:
 #                 pred_native = mask_pred_result
 #                 gt_mask_t = None
 
-#         instance_r = { 'pred': ((pred_native.cpu().numpy() > 0) * 255).astype(np.uint8), 'gt': ((gt_mask_t.cpu().numpy() > 0) * 255).astype(np.uint8) if gt_mask_t is not None else None, 'image_name': _seg_info['image_id'], 'id': _seg_info['data_id'], 'mask_id': _seg_info['mask_id'], }
-#         processed_results.append(instance_r)
+#             #Fix: instance_r and append must be inside the for loop
+#             instance_r = { 'pred': ((pred_native.cpu().numpy() > 0) * 255).astype(np.uint8), 'gt': ((gt_mask_t.cpu().numpy() > 0) * 255).astype(np.uint8) if gt_mask_t is not None else None, 'image_name': _seg_info['image_id'], 'id': _seg_info['data_id'], 'mask_id': _seg_info['mask_id'], }
+#             processed_results.append(instance_r)
 
 #         return processed_results
 
@@ -1219,10 +1220,10 @@ class SegEarthR2(MiphaPhiForCausalLM):
                 torch.repeat_interleave(feat, repeats=mask_num, dim=0)
                 for feat in multi_scale_features
             ]
-    #         SEG_embedding, multi_scale_features = self.reason_fusion(
-    # SEG_embedding,
-    # multi_scale_features
-    #         )
+            SEG_embedding, multi_scale_features = self.reason_fusion(
+    SEG_embedding,
+    multi_scale_features
+            )
             mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
 
             mask_pred_results = mask_outputs["pred_masks"]

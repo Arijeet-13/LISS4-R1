@@ -93,37 +93,6 @@ def preprocess_image(image_path, pad_value = 128.0, short_edge_length = 1024, ma
     
     return img_padded
 
-# def preprocess_mask(mask, image_size): #Old
-#     if len(mask.shape) == 2:
-#         mask = np.expand_dims(mask, axis=0)
-#     bs, h, w = mask.shape
-#     processed_masks = []
-#     for i in range(bs):
-#         single_mask = mask[i]
-#         hh, ww = single_mask.shape[:2]
-#         if ww > hh:
-#             new_w = image_size
-#             new_h = int(hh * (image_size / ww))
-#         else:
-#             new_h = image_size
-#             new_w = int(ww * (image_size / hh))
-#         resized_mask = cv2.resize(single_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-#         pad_h = image_size - new_h
-#         pad_w = image_size - new_w
-#         top = pad_h // 2
-#         bottom = pad_h - top
-#         left = pad_w // 2
-#         right = pad_w - left
-
-#         padded_mask = cv2.copyMakeBorder(resized_mask, top, bottom, left, right, 
-#                                          cv2.BORDER_CONSTANT, value=0)
-#         processed_masks.append(padded_mask)
-#     processed_masks = np.stack(processed_masks, axis=0)
-    
-#     return processed_masks
-
-
 class RS_Base_Dataset(Dataset):
     
     def tokenizer_special_tokens(self, prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, refer_token_index=REFER_TOKEN_INDEX, return_tensors=None):
@@ -266,7 +235,7 @@ class LaSeRSDataset(RS_Base_Dataset):
         with open(self.LaSeRS_json_path, "r") as f:
             data = json.load(f)
         self.reason_file = data
-    
+
     def __len__(self):
         return len(self.reason_file)
     
@@ -422,8 +391,8 @@ class RefSegRSDataset(RS_Base_Dataset):
 
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         mask[mask == 255] = 1
-        # masks = np.expand_dims(mask, axis=0) Changed
-        masks = preprocess_mask(mask, image_size=1024)
+        
+        masks = np.expand_dims(mask, axis=0)              # (1, H_orig, W_orig)
 
         answer = 'Sure, it is [SEG]. '
         mask_num = 1
@@ -489,6 +458,7 @@ class RRSISDDataset(RS_Base_Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.split = split
+        self.is_train = is_train
 
         self.RRSISD_data_root = os.path.join(base_data_path)
 
@@ -561,11 +531,10 @@ class RRSISDDataset(RS_Base_Dataset):
         image_tensor = torch.as_tensor(np.ascontiguousarray(image_RGB.transpose(2, 0, 1))).float()
         data_dict['image'] = (image_tensor - self.pixel_mean) / self.pixel_std
 
-        # if len(mask.shape) == 2:
-        #     masks = np.expand_dims(mask, axis=0)
-        # else:
-        #     masks = mask
-        masks = preprocess_mask(mask, image_size=1024)
+        if len(mask.shape) == 2:
+            masks = np.expand_dims(mask, axis=0)          # (1, H_orig, W_orig)
+        else:
+            masks = mask
 
         answer = 'Sure, it is [SEG]. '
         mask_num = 1
@@ -625,7 +594,7 @@ class RISBenchDataset(RS_Base_Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.split = split
-
+        
         from datasets import Dataset as HFDataset, concatenate_datasets
         split_dir_map = {
             'train': 'train',
@@ -688,8 +657,7 @@ class RISBenchDataset(RS_Base_Dataset):
 
         mask_np = np.array(mask_pil)
         mask_np = (mask_np > 0).astype(np.uint8)
-        # masks   = np.expand_dims(mask_np, axis=0)
-        masks = preprocess_mask(mask_np, image_size=1024)
+        masks   = np.expand_dims(mask_np, axis=0)
 
         size  = 1024.0
         scale = size / min(h, w)
@@ -778,7 +746,7 @@ class EarthReasonDataset(RS_Base_Dataset):
         tokenized = tokenized + REFER_token_id
         return torch.tensor(tokenized)
 
-    def __init__(self, base_data_path, tokenizer, data_args, split='train'):
+    def __init__(self, base_data_path, tokenizer, data_args, split='train', is_train = True):
         self.pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
         self.pixel_std = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
 
@@ -786,6 +754,7 @@ class EarthReasonDataset(RS_Base_Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.split = split
+        self.is_train = is_train
 
         split_name = 'train'
         if 'val' in split.lower():
@@ -872,7 +841,11 @@ class EarthReasonDataset(RS_Base_Dataset):
         mask = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
         if mask is not None:
             mask[mask != 0] = 1
-            masks = preprocess_mask(mask, image_size=1024)
+            #Fix: use masks directly in both branches so annotation dict masks[i] works
+            if self.is_train:
+                masks = preprocess_mask(mask, image_size=1024)    # (1, 1024, 1024)
+            else:
+                masks = np.expand_dims(mask, axis=0)              # (1, H_orig, W_orig)
         else:
             masks = None
 
