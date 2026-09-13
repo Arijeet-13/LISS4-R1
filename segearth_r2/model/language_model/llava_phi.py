@@ -1096,34 +1096,39 @@ class SegEarthR2(MiphaPhiForCausalLM):
 
         mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
 
-        
-        mask_pred_results = mask_outputs["pred_masks"]
-        images = ImageList.from_tensors(images, self.size_divisibility)
-        mask_pred_results = F.interpolate(
-            mask_pred_results,
-            size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-            mode="bilinear",
-            align_corners=False,
-        )
-        
+        #Here are changes
+        mask_outputs = self.predictor(multi_scale_features, mask_features, None, None, SEG_embedding) 
+        mask_pred_results = mask_outputs["pred_masks"]   # raw predictor output, no resizing yet
+
+        images = ImageList.from_tensors(images, self.size_divisibility)  # still needed if used elsewhere; otherwise can drop
+
         processed_results = []
         for _seg_info, mask_pred_result in zip(seg_info, mask_pred_results):
             gt_mask = _seg_info['mask']
             if gt_mask is not None:
                 if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
                     gt_mask = gt_mask[0]
-                print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
-                gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
-                gt_mask = F.interpolate(
-                    gt_mask,
-                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+
+                gt_mask_t = torch.as_tensor(gt_mask, dtype=torch.float32, device=mask_pred_result.device)
+                gt_h, gt_w = gt_mask_t.shape[-2], gt_mask_t.shape[-1]
+
+                # Single resize: predictor's raw output resolution -> GT's native size directly.
+                pred_native = F.interpolate(
+                    mask_pred_result.unsqueeze(0).float(),
+                    size=(gt_h, gt_w),
                     mode="bilinear",
                     align_corners=False,
-                )
-            
+                ).squeeze(0)
+
+                pred_bin = (pred_native > 0)
+                gt_bin = (gt_mask_t > 0.5)
+            else:
+                pred_bin = (mask_pred_result > 0)
+                gt_bin = None
+
             instance_r = {
-                'pred': ((mask_pred_result.cpu().numpy() > 0) * 255).astype(np.uint8),
-                'gt': ((gt_mask.cpu().numpy() > 0) * 255).astype(np.uint8),
+                'pred': (pred_bin.cpu().numpy() * 255).astype(np.uint8),
+                'gt': (gt_bin.cpu().numpy() * 255).astype(np.uint8) if gt_bin is not None else None,
                 'image_name': _seg_info['image_id'],
                 'id': _seg_info['data_id'],
                 'mask_id': _seg_info['mask_id'],
@@ -1131,6 +1136,40 @@ class SegEarthR2(MiphaPhiForCausalLM):
             processed_results.append(instance_r)
 
         return processed_results
+        # mask_pred_results = mask_outputs["pred_masks"]
+        # images = ImageList.from_tensors(images, self.size_divisibility)
+        # mask_pred_results = F.interpolate(
+        #     mask_pred_results,
+        #     size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+        #     mode="bilinear",
+        #     align_corners=False,
+        # )
+        
+        # processed_results = []
+        # for _seg_info, mask_pred_result in zip(seg_info, mask_pred_results):
+        #     gt_mask = _seg_info['mask']
+        #     if gt_mask is not None:
+        #         if gt_mask.ndim == 3 and gt_mask.shape[0] == 1:
+        #             gt_mask = gt_mask[0]
+        #         print(f"GT native: {gt_mask.shape}, padded canvas: {images.tensor.shape[-2:]}")
+        #         gt_mask = torch.as_tensor(gt_mask, dtype=mask_pred_result.dtype, device=mask_pred_result.device).unsqueeze(0).unsqueeze(0)
+        #         gt_mask = F.interpolate(
+        #             gt_mask,
+        #             size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+        #             mode="bilinear",
+        #             align_corners=False,
+        #         )
+            
+        #     instance_r = {
+        #         'pred': ((mask_pred_result.cpu().numpy() > 0) * 255).astype(np.uint8),
+        #         'gt': ((gt_mask.cpu().numpy() > 0) * 255).astype(np.uint8),
+        #         'image_name': _seg_info['image_id'],
+        #         'id': _seg_info['data_id'],
+        #         'mask_id': _seg_info['mask_id'],
+        #     }
+        #     processed_results.append(instance_r)
+
+        # return processed_results
 #         mask_pred_results = mask_outputs["pred_masks"]
 #         images = ImageList.from_tensors(images, self.size_divisibility)
 # # No longer resizing predictions to the padded canvas here —
