@@ -159,8 +159,8 @@ class Arguments:
     data_split: str = field(default='test')
     ignore_index: int = 255
 
-    save_masks: bool = True
-    save_overlay: bool = True          # toggle overlay visualization
+    save_masks: bool = False
+    save_overlay: bool = False          # toggle overlay visualization
     overlay_alpha: float = 0.5         # overlay opacity
 
 
