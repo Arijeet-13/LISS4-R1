@@ -55,8 +55,8 @@ class AverageMeter(object):
 def intersectionAndUnionGPU(output, target, K, ignore_index=255):
     assert output.dim() in [1, 2, 3]
     assert output.shape == target.shape
-    output = output.view(-1)
-    target = target.view(-1)
+    output = output.reshape(-1)
+    target = target.reshape(-1)
     output[target == ignore_index] = ignore_index
     intersection = output[output == target]
     area_intersection = torch.histc(intersection.float(), bins=K, min=0, max=K - 1)
