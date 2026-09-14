@@ -458,7 +458,6 @@ class RRSISDDataset(RS_Base_Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.split = split
-        self.is_train = is_train
 
         self.RRSISD_data_root = os.path.join(base_data_path)
 
