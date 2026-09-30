@@ -1,21 +1,3 @@
-#!/usr/bin/env python
-"""
-Visualization script for SegEarth-R2 predictions.
-
-Generates a publication-quality figure with columns:
-    QA  |  Image  |  Ground Truth (overlay)  |  Predicted Mask (overlay)
-
-Supports datasets: LaSeRS, EarthReason, RefSegRS, RRSISD, RISBench, LISS4Reason
-
-Usage:
-    python segearth_r2/eval/visualize.py \
-        --model_path  <path_to_merged_model> \
-        --base_data_path <dataset_root> \
-        --dataset_type LaSeRS \
-        --num_samples 5 \
-        --output_path output/visualization.png
-"""
-
 import os
 import sys
 import json
@@ -25,7 +7,6 @@ import random
 import textwrap
 import re
 
-# -- project root on sys.path -------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, project_root)
@@ -42,9 +23,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-# ==============================================================================
-# Category lists per dataset (from the paper's table)
-# ==============================================================================
 DATASET_CATEGORIES = {
     "LaSeRS": [
         # General
@@ -116,9 +94,6 @@ DATASET_CATEGORIES = {
     ],
 }
 
-# ==============================================================================
-# 20 visually distinct colours (RGB 0-1) - high-contrast on white & imagery
-# ==============================================================================
 PALETTE_RGB = [
     (0.86, 0.15, 0.15),   # red (#DC2626)
     (0.09, 0.64, 0.29),   # green (#16A34A)
@@ -142,32 +117,20 @@ PALETTE_RGB = [
     (0.76, 0.25, 0.05),   # deep orange (#C2410C)
 ]
 
-
-# ==============================================================================
-# Helpers
-# ==============================================================================
-
 def extract_category(instruction, dataset_type):
-    """
-    Try to match a known category from the instruction text.
-    Falls back to the first few words if no known category matches.
-    """
     cats = DATASET_CATEGORIES.get(dataset_type, [])
     inst_lower = instruction.lower()
 
-    # Sort categories longest first so "ground track field" beats "field"
     sorted_cats = sorted(cats, key=len, reverse=True)
     for cat in sorted_cats:
         if cat.lower() in inst_lower:
             return cat
 
-    # Fallback: return first 3-4 meaningful words as a label
     words = instruction.strip().split()
     return " ".join(words[:4]) if words else "object"
 
 
 class CategoryColorMap:
-    """Assigns a unique colour from the palette to each unique category."""
 
     def __init__(self):
         self._map = {}
@@ -187,20 +150,6 @@ class CategoryColorMap:
 
 
 def overlay_mask_on_image(image_rgb, mask_binary, color_rgb, alpha=0.5):
-    """
-    Overlay a coloured semi-transparent mask on an RGB image.
-
-    Parameters
-    ----------
-    image_rgb : (H, W, 3) uint8
-    mask_binary : (H, W) 0/1 or bool
-    color_rgb : (r, g, b) floats in [0, 1]
-    alpha : overlay opacity
-
-    Returns
-    -------
-    blended : (H, W, 3) uint8
-    """
     h, w = image_rgb.shape[:2]
     mask = mask_binary.astype(np.uint8)
     if mask.shape[:2] != (h, w):
@@ -215,14 +164,10 @@ def overlay_mask_on_image(image_rgb, mask_binary, color_rgb, alpha=0.5):
     overlay[mask == 1] = color_uint8
     blended = cv2.addWeighted(overlay, alpha, image_rgb, 1 - alpha, 0)
 
-    # draw a thin contour for clarity
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(blended, contours, -1, color_uint8.tolist(), 2)
 
     return blended
-
-
-# -- Per-dataset Q/A & metadata extractors -------------------------------------
 
 def _get_qa_lasers(dataset, idx):
     info = dataset.reason_file[idx]
@@ -251,6 +196,11 @@ def _get_qa_risbench(dataset, idx):
     question = sample["phrase"]
     answer = "Sure, it is [SEG]."
     image_path = os.path.join(dataset._img_cache_dir, f"{idx}.jpg")
+    if not os.path.exists(image_path):
+        img_pil = sample["image"]
+        if img_pil.mode != "RGB":
+            img_pil = img_pil.convert("RGB")
+        img_pil.save(image_path)
     return question, answer, image_path
 
 
@@ -259,7 +209,10 @@ def _get_qa_earthreason(dataset, idx):
     with open(qa_path, "r") as f:
         QAs = json.load(f)
     question = QAs["questions"][0]
-    answer = QAs["answer"][0] if QAs["answer"] else "No target object."
+    if QAs.get("answer"):
+        answer = f"Sure, it is [SEG]. \n{QAs['answer'][0]}"
+    else:
+        answer = "There is no target object in the image."
     return question, answer, image_path
 
 
@@ -268,7 +221,10 @@ def _get_qa_liss4reason(dataset, idx):
     with open(qa_path, "r") as f:
         QAs = json.load(f)
     question = QAs["questions"][0]
-    answer = QAs["answer"][0] if QAs["answer"] else "No target object."
+    if QAs.get("answer"):
+        answer = f"Sure, it is [SEG]. \n{QAs['answer'][0]}"
+    else:
+        answer = "There is no target object in the image."
     return question, answer, image_path
 
 
@@ -283,27 +239,18 @@ QA_EXTRACTORS = {
 
 
 def load_original_image(image_path):
-    """Load an image from disk as RGB uint8 (H, W, 3)."""
     img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if img_bgr is None:
+    if img_bgr is not None:
+        return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    try:
+        pil_img = Image.open(image_path).convert("RGB")
+        return np.array(pil_img, dtype=np.uint8)
+    except Exception:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
-    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-
-# ==============================================================================
-# Dataset & split creation (mirrors eval.py logic)
-# ==============================================================================
 
 def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split,
                     dataset_classes=None):
-    """Instantiate the correct dataset class.
-
-    Parameters
-    ----------
-    dataset_classes : dict, optional
-        Mapping of dataset_type name -> class.  When running inside main(),
-        this is populated from the deferred imports.
-    """
     if dataset_classes is None:
         raise RuntimeError(
             "create_dataset() requires dataset_classes dict. "
@@ -340,35 +287,13 @@ def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split,
     )
 
 
-# ==============================================================================
-# Figure builder
-# ==============================================================================
-
-# ==============================================================================
-# QA Formatting & Typography (matches paper layout)
-# ==============================================================================
-
 def format_qa_for_display(raw_question, raw_answer, category, sample_idx):
-    """
-    Format Question and Answer for display.
-
-    Uses the raw question and answer from the dataset as-is.
-    No template fabrication — the actual dataset text is shown.
-    """
     q = raw_question.strip()
     a = raw_answer.strip()
     return q, a
 
 
 def _get_font_bundle(size=24, style="serif"):
-    """
-    Load font variants (regular, bold, bold-italic).
-    Styles supported:
-      - 'serif' (default): DejaVuSerif (bundled with matplotlib)
-      - 'sans': DejaVuSans (bundled with matplotlib)
-      - 'comic': Comic Sans (if installed) or DejaVuSans fallback
-      - custom .ttf path
-    """
     import matplotlib
     font_dir = os.path.join(
         os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf"
@@ -398,7 +323,6 @@ def _get_font_bundle(size=24, style="serif"):
         elif len(found) == 1:
             f = ImageFont.truetype(found[0], size)
             return f, f, f
-        # Fall back to sans if comic not found
         style = "sans"
 
     if style == "sans":
@@ -414,7 +338,6 @@ def _get_font_bundle(size=24, style="serif"):
                 ),
             )
 
-    # Default: serif
     cand_reg = os.path.join(font_dir, "DejaVuSerif.ttf")
     cand_bold = os.path.join(font_dir, "DejaVuSerif-Bold.ttf")
     cand_italic = os.path.join(font_dir, "DejaVuSerif-BoldItalic.ttf")
@@ -439,16 +362,8 @@ def render_qa_cell(
     height=512,
     base_font_size=24,
     font_style="serif",
+    category=None,
 ):
-    """
-    Renders the QA column as a clean, publication-ready image:
-    - Pure white background with no outer border box
-    - 'Q:' in bold font
-    - Question text line-wrapped
-    - 'A:' in bold font
-    - '<p> category </p>' and '[SEG]' in bold italic with class color
-    - Text centered vertically relative to the image row
-    """
     color_uint8 = (
         int(category_color_rgb[0] * 255),
         int(category_color_rgb[1] * 255),
@@ -456,27 +371,44 @@ def render_qa_cell(
     )
     black_color = (15, 15, 15)
 
+    cat_word = category.strip() if category else ""
+    cat_pat = rf"\b{re.escape(cat_word)}\b" if len(cat_word) >= 2 else None
+    if cat_pat:
+        split_pattern = rf"(<p>.*?</p>|\[SEG\]|{cat_pat})"
+    else:
+        split_pattern = r"(<p>.*?</p>|\[SEG\])"
+
+    def _tokenize_text(text, default_color):
+        parts = re.split(split_pattern, text, flags=re.IGNORECASE)
+        res = []
+        for p in parts:
+            if not p:
+                continue
+            p_strip = p.strip()
+            if not p_strip:
+                continue
+            is_highlight = (
+                p_strip.startswith("<p>")
+                or p_strip == "[SEG]"
+                or (cat_pat and bool(re.fullmatch(cat_pat, p_strip, flags=re.IGNORECASE)))
+            )
+            if is_highlight:
+                res.append((p_strip + " ", f_italic, color_uint8))
+            else:
+                res.append((p_strip + " ", f_reg, default_color))
+        return res
+
     for font_size in [base_font_size, base_font_size - 3, base_font_size - 6]:
         f_reg, f_bold, f_italic = _get_font_bundle(font_size, style=font_style)
         pad_x = 12
         max_w = width - pad_x * 2
         line_h = int(font_size * 1.45)
 
-        tokens = [
-            ("Q: ", f_bold, (0, 0, 0)),
-            (question_text, f_reg, black_color),
-            ("\n\n", None, None),
-            ("A: ", f_bold, (0, 0, 0)),
-        ]
-
-        parts = re.split(r"(<p>.*?</p>|\[SEG\])", answer_text)
-        for p in parts:
-            if not p:
-                continue
-            if p.startswith("<p>") or p == "[SEG]":
-                tokens.append((p + " ", f_italic, color_uint8))
-            else:
-                tokens.append((p.strip() + " ", f_reg, black_color))
+        tokens = [("Q: ", f_bold, (0, 0, 0))]
+        tokens.extend(_tokenize_text(question_text, black_color))
+        tokens.append(("\n\n", None, None))
+        tokens.append(("A: ", f_bold, (0, 0, 0)))
+        tokens.extend(_tokenize_text(answer_text, black_color))
 
         test_img = Image.new("RGB", (width, height), (255, 255, 255))
         test_draw = ImageDraw.Draw(test_img)
@@ -536,10 +468,6 @@ def render_qa_cell(
     return np.array(out_img)
 
 
-# ==============================================================================
-# Figure builder
-# ==============================================================================
-
 def build_figure(
     rows,
     cmap,
@@ -550,18 +478,6 @@ def build_figure(
     qa_font_style="serif",
     header_font_size=25,
 ):
-    """
-    Build and save the final publication-quality figure.
-
-    Columns:
-        QA  |  Image  |  Ground Truth  |  Pred Mask
-
-    Features:
-    - Tight column spacing (wspace=0.01)
-    - Headings snug to the top row with enlarged font (+3 pt = 25 pt)
-    - Configurable QA font size & font style (serif, sans, comic)
-    - No suptitle at top, no legend at bottom
-    """
     n_rows = len(rows)
     col_labels = ["QA", "Image", "Ground Truth", "Pred Mask"]
 
@@ -580,8 +496,6 @@ def build_figure(
         left=0.015,
         right=0.985,
     )
-
-    # -- Column headers (very top of figure, snug to top row, NO SUPTITLE) -----
     for col_idx, label in enumerate(col_labels):
         ax = fig.add_subplot(gs[0, col_idx])
         ax.text(
@@ -592,8 +506,6 @@ def build_figure(
             family="sans-serif",
         )
         ax.axis("off")
-
-    # -- Rows ------------------------------------------------------------------
     for row_idx, row_data in enumerate(rows):
         color_rgb = cmap(row_data["category"])
         img_rgb = row_data["image_rgb"]
@@ -601,7 +513,6 @@ def build_figure(
         cell_h = 512
         cell_w = int(cell_h * 1.15)
 
-        # 1. QA Cell
         ax_qa = fig.add_subplot(gs[row_idx + 1, 0])
         qa_cell = render_qa_cell(
             question_text=row_data["question"],
@@ -611,16 +522,15 @@ def build_figure(
             height=cell_h,
             base_font_size=qa_font_size,
             font_style=qa_font_style,
+            category=row_data.get("category"),
         )
         ax_qa.imshow(qa_cell)
         ax_qa.axis("off")
 
-        # 2. Original Image
         ax_img = fig.add_subplot(gs[row_idx + 1, 1])
         ax_img.imshow(img_rgb)
         ax_img.axis("off")
 
-        # 3. Ground Truth overlay
         ax_gt = fig.add_subplot(gs[row_idx + 1, 2])
         gt_overlay = overlay_mask_on_image(
             img_rgb, row_data["gt_mask"], color_rgb, alpha
@@ -628,7 +538,6 @@ def build_figure(
         ax_gt.imshow(gt_overlay)
         ax_gt.axis("off")
 
-        # 4. Predicted Mask overlay
         ax_pred = fig.add_subplot(gs[row_idx + 1, 3])
         pred_overlay = overlay_mask_on_image(
             img_rgb, row_data["pred_mask"], color_rgb, alpha
@@ -636,16 +545,10 @@ def build_figure(
         ax_pred.imshow(pred_overlay)
         ax_pred.axis("off")
 
-    # Clean figure ending (NO LEGEND, NO SUPTITLE)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"\n>>> Visualization saved to: {os.path.abspath(output_path)}")
-
-
-# ==============================================================================
-# CLI & Main
-# ==============================================================================
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -712,14 +615,97 @@ def parse_args():
         help="Font size for column headers (default: 25).",
     )
     p.add_argument(
+        "--use_llm_response", action="store_true", default=True,
+        help="Use response generated from the model's LLM (default: True). "
+             "Falls back to the dataset ground-truth answer if generation is unavailable.",
+    )
+    p.add_argument(
+        "--no_llm_response", dest="use_llm_response", action="store_false",
+        help="Disable LLM generation and directly use the dataset ground-truth answer.",
+    )
+    p.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducible sample selection.",
     )
     return p.parse_args()
 
 
+@torch.no_grad()
+def generate_llm_response(model, tokenizer, batch, device, max_new_tokens=64):
+    try:
+        labels = batch.get("labels")
+        input_ids = batch.get("input_ids")
+        if input_ids is None or labels is None:
+            return None
+
+        lbl = labels[0]
+        inp = input_ids[0]
+        prompt_mask = (lbl == -100)
+        if prompt_mask.any() and not prompt_mask.all():
+            prompt_len = int((~prompt_mask).nonzero()[0].item())
+        else:
+            prompt_len = len(inp)
+
+        prompt_input_ids = inp[:prompt_len].unsqueeze(0).to(device)
+
+        images_clip = (
+            batch["images_clip"].to(device, dtype=torch.float16)
+            if "images_clip" in batch and batch["images_clip"] is not None
+            else None
+        )
+        token_refer_id = (
+            [ids.to(device) for ids in batch["token_refer_id"]]
+            if "token_refer_id" in batch and batch["token_refer_id"] is not None
+            else None
+        )
+
+        generated_ids = []
+        cur_input_ids = prompt_input_ids
+        past_key_values = None
+
+        for step in range(max_new_tokens):
+            if step == 0:
+                out = model(
+                    input_ids=cur_input_ids,
+                    images_clip=images_clip,
+                    token_refer_id=token_refer_id,
+                    use_cache=True,
+                )
+            else:
+                out = model(
+                    input_ids=cur_input_ids[:, -1:],
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+
+            logits = out.logits[:, -1, :]
+            past_key_values = out.past_key_values
+            next_token = torch.argmax(logits, dim=-1)
+            next_token_id = int(next_token.item())
+
+            if next_token_id == tokenizer.eos_token_id:
+                break
+
+            generated_ids.append(next_token_id)
+            cur_input_ids = torch.cat([cur_input_ids, next_token.unsqueeze(0)], dim=-1)
+
+            # Check for EOS-like strings
+            if len(generated_ids) >= 4:
+                decoded_partial = tokenizer.decode(generated_ids, skip_special_tokens=False)
+                if "<|endoftext|>" in decoded_partial or "###" in decoded_partial:
+                    break
+
+        if generated_ids:
+            decoded = tokenizer.decode(generated_ids, skip_special_tokens=False)
+            decoded = decoded.split("<|endoftext|>")[0].split("###")[0].strip()
+            if decoded:
+                return decoded
+    except Exception as e:
+        pass
+    return None
+
+
 class _ModelArgs:
-    """Minimal namespace expected by load_pretrained_model."""
     def __init__(self, mask_config, vision_tower, version="v0"):
         self.mask_config = mask_config
         self.vision_tower = vision_tower
@@ -731,8 +717,6 @@ class _ModelArgs:
 
 def main():
     args = parse_args()
-
-    # -- Deferred imports (require detectron2, torch models, etc.) -------------
     import transformers
     from transformers import SiglipImageProcessor
     from segearth_r2.utils import conversation as conversation_lib
@@ -746,8 +730,6 @@ def main():
         LISS4ReasonDataset,
         RISBenchDataset,
     )
-
-    # Make dataset classes available to create_dataset() via a lookup dict
     _DATASET_CLASSES = {
         "LaSeRS": LaSeRSDataset,
         "EarthReason": EarthReasonDataset,
@@ -757,7 +739,6 @@ def main():
         "RISBench": RISBenchDataset,
     }
 
-    # -- Interactive prompt for num_samples ------------------------------------
     if args.num_samples is None:
         while True:
             try:
@@ -776,7 +757,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # -- Load model ------------------------------------------------------------
     print("\n---------- Loading Model ----------")
     model_args = _ModelArgs(args.mask_config, args.vision_tower, args.version)
     tokenizer, model, image_processor, context_len = load_pretrained_model(
@@ -789,7 +769,6 @@ def main():
     model.eval()
     print("---------- Model Loaded ----------\n")
 
-    # -- Prepare data pipeline -------------------------------------------------
     data_args_ns = argparse.Namespace(
         base_data_path=args.base_data_path,
         is_multimodal=True,
@@ -805,7 +784,6 @@ def main():
         tokenizer=tokenizer, clip_image_processor=clip_image_processor
     )
 
-    # -- Create dataset --------------------------------------------------------
     print(f"Loading dataset: {args.dataset_type} (split={args.data_split})")
     dataset = create_dataset(
         args.dataset_type, args.base_data_path,
@@ -822,7 +800,6 @@ def main():
         )
         args.num_samples = total
 
-    # -- Select random sample indices (that have valid masks) ------------------
     qa_extractor = QA_EXTRACTORS[args.dataset_type]
 
     candidate_indices = list(range(total))
@@ -838,14 +815,12 @@ def main():
             break
         tried += 1
 
-        # -- 1. Get Q/A text & image path BEFORE touching the data_dict --------
         try:
             question, answer, image_path = qa_extractor(dataset, idx)
         except Exception as e:
             print(f"  [skip idx={idx}] Q/A extraction error: {e}")
             continue
 
-        # -- 2. Get data_dict from the dataset ---------------------------------
         try:
             data_dict = dataset[idx]
         except Exception as e:
@@ -857,16 +832,12 @@ def main():
             # no mask -> skip
             continue
 
-        # -- 3. Collate into a batch of 1 --------------------------------------
-        #   The collator mutates data_dict in-place (deletes input_ids, labels,
-        #   image).  That's OK - we already captured what we need above.
         try:
             batch = data_collator([data_dict])
         except Exception as e:
             print(f"  [skip idx={idx}] Collation error: {e}")
             continue
 
-        # -- 4. Run inference --------------------------------------------------
         with torch.no_grad():
             inputs_gpu = {
                 k: (v.to(device) if torch.is_tensor(v) else v)
@@ -897,31 +868,42 @@ def main():
         if not outputs:
             continue
 
-        result = outputs[0]  # first (and only) output in the batch
+        result = outputs[0]
         pred_np = result["pred"]
         gt_np = result["gt"]
 
         if gt_np is None:
             continue
 
-        # Convert from 0/255 uint8 to 0/1 binary
         pred_bin = (pred_np > 0).astype(np.uint8).squeeze()
         gt_bin = (gt_np > 0).astype(np.uint8).squeeze()
 
-        # -- 5. Load original image --------------------------------------------
+        final_answer = answer
+        if args.use_llm_response:
+            try:
+                llm_resp = generate_llm_response(
+                    model=model,
+                    tokenizer=tokenizer,
+                    batch=batch,
+                    device=device,
+                )
+                if llm_resp:
+                    final_answer = llm_resp
+            except Exception as e:
+                print(f"  [idx={idx}] LLM response fallback to dataset: {e}")
+
         try:
             image_rgb = load_original_image(image_path)
         except Exception as e:
             print(f"  [skip idx={idx}] Image load error: {e}")
             continue
 
-        # -- 6. Extract category & format QA for publication display -----------
         instruction_text = question  # the referring instruction
         category = extract_category(instruction_text, args.dataset_type)
         _ = cmap(category)  # register colour
 
         question_disp, answer_disp = format_qa_for_display(
-            question, answer, category, len(selected_rows)
+            question, final_answer, category, len(selected_rows)
         )
 
         selected_rows.append({
@@ -942,7 +924,6 @@ def main():
         print("\nERROR: Could not find any valid samples with masks. Exiting.")
         sys.exit(1)
 
-    # -- Build & save figure ---------------------------------------------------
     print(f"\nBuilding figure with {len(selected_rows)} rows ...")
     build_figure(
         rows=selected_rows,
