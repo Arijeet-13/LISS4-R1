@@ -42,21 +42,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-import transformers
-from transformers import SiglipImageProcessor
-
-from segearth_r2.utils import conversation as conversation_lib
-from segearth_r2.utils.builder import load_pretrained_model
-from segearth_r2.datasets.dataset import (
-    DataCollatorForCOCODatasetV2,
-    LaSeRSDataset,
-    EarthReasonDataset,
-    RefSegRSDataset,
-    RRSISDDataset,
-    LISS4ReasonDataset,
-    RISBenchDataset,
-)
-
 # ==============================================================================
 # Category lists per dataset (from the paper's table)
 # ==============================================================================
@@ -309,63 +294,50 @@ def load_original_image(image_path):
 # Dataset & split creation (mirrors eval.py logic)
 # ==============================================================================
 
-def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split):
-    """Instantiate the correct dataset class."""
+def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split,
+                    dataset_classes=None):
+    """Instantiate the correct dataset class.
+
+    Parameters
+    ----------
+    dataset_classes : dict, optional
+        Mapping of dataset_type name -> class.  When running inside main(),
+        this is populated from the deferred imports.
+    """
+    if dataset_classes is None:
+        raise RuntimeError(
+            "create_dataset() requires dataset_classes dict. "
+            "Pass the _DATASET_CLASSES dict from main()."
+        )
+
+    cls = dataset_classes.get(dataset_type)
+    if cls is None:
+        raise ValueError(
+            f"Unknown dataset_type: {dataset_type!r}. "
+            f"Expected one of: {', '.join(dataset_classes.keys())}"
+        )
+
     if dataset_type == "LaSeRS":
         json_folders = os.path.join(
             base_data_path, "rs_reason_seg/LaSeRS/test/annotations"
         )
         if os.path.isdir(json_folders):
-            # Use the first JSON split found (same as eval.py)
             split_file = sorted(os.listdir(json_folders))[0]
         else:
             split_file = split
-        return LaSeRSDataset(
+        return cls(
             base_data_path=base_data_path,
             tokenizer=tokenizer,
             data_args=data_args,
             split=split_file,
         )
-    elif dataset_type == "EarthReason":
-        return EarthReasonDataset(
-            base_data_path=base_data_path,
-            tokenizer=tokenizer,
-            data_args=data_args,
-            split=split,
-        )
-    elif dataset_type == "RefSegRS":
-        return RefSegRSDataset(
-            base_data_path=base_data_path,
-            tokenizer=tokenizer,
-            data_args=data_args,
-            split=split,
-        )
-    elif dataset_type == "RRSISD":
-        return RRSISDDataset(
-            base_data_path=base_data_path,
-            tokenizer=tokenizer,
-            data_args=data_args,
-            split=split,
-        )
-    elif dataset_type == "LISS4Reason":
-        return LISS4ReasonDataset(
-            base_data_path=base_data_path,
-            tokenizer=tokenizer,
-            data_args=data_args,
-            split=split,
-        )
-    elif dataset_type == "RISBench":
-        return RISBenchDataset(
-            base_data_path=base_data_path,
-            tokenizer=tokenizer,
-            data_args=data_args,
-            split=split,
-        )
-    else:
-        raise ValueError(
-            f"Unknown dataset_type: {dataset_type!r}. "
-            f"Expected one of: LaSeRS, EarthReason, RefSegRS, RRSISD, RISBench, LISS4Reason"
-        )
+
+    return cls(
+        base_data_path=base_data_path,
+        tokenizer=tokenizer,
+        data_args=data_args,
+        split=split,
+    )
 
 
 # ==============================================================================
@@ -378,76 +350,82 @@ def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split):
 
 def format_qa_for_display(raw_question, raw_answer, category, sample_idx):
     """
-    Format Question and Answer to match the publication figure style:
-    - If question is a short phrase ('large harbor'), format as 'Can you locate the large harbor?'
-    - If answer doesn't have '<p> ... </p>', format with '<p> {category} </p> [SEG]'.
+    Format Question and Answer for display.
+
+    Uses the raw question and answer from the dataset as-is.
+    No template fabrication — the actual dataset text is shown.
     """
     q = raw_question.strip()
-    q_lower = q.lower()
-    is_already_sentence = any(
-        q_lower.startswith(prefix)
-        for prefix in [
-            "can you", "could you", "please", "what", "where", "how",
-            "which", "find", "locate", "segment", "is there", "identify",
-        ]
-    ) or (len(q) > 40 and q.endswith((".", "?", "!")))
-
-    if not is_already_sentence:
-        # It's a short referring expression like "large harbor" or "vehicle on the lower right"
-        if q_lower.startswith(("the ", "a ", "an ")):
-            q_formatted = f"Can you locate {q}."
-        else:
-            q_formatted = f"Can you locate the {q}."
-    else:
-        q_formatted = q
-
-    # Normalize answer
-    if "<p>" in raw_answer and "</p>" in raw_answer:
-        a_formatted = raw_answer.strip()
-    else:
-        templates = [
-            "Of course! The <p> {cat} </p> [SEG] segmentation completed.",
-            "Sure! The <p> {cat} </p> [SEG] area is here.",
-            "Sure, I have segmented the <p> {cat} </p> [SEG] area.",
-        ]
-        a_formatted = templates[sample_idx % len(templates)].format(cat=category)
-
-    return q_formatted, a_formatted
+    a = raw_answer.strip()
+    return q, a
 
 
-def _get_font_bundle(size=24):
+def _get_font_bundle(size=24, style="serif"):
     """
-    Load serif fonts (regular, bold, bold-italic) bundled with matplotlib
-    so this works out-of-the-box on Linux (Kaggle/Colab), Windows, Mac.
+    Load font variants (regular, bold, bold-italic).
+    Styles supported:
+      - 'serif' (default): DejaVuSerif (bundled with matplotlib)
+      - 'sans': DejaVuSans (bundled with matplotlib)
+      - 'comic': Comic Sans (if installed) or DejaVuSans fallback
+      - custom .ttf path
     """
     import matplotlib
     font_dir = os.path.join(
         os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf"
     )
 
+    if os.path.isfile(style):
+        # Custom .ttf path passed
+        f = ImageFont.truetype(style, size)
+        return f, f, f
+
+    style = style.lower()
+
+    if style == "comic":
+        candidates = [
+            "C:\\Windows\\Fonts\\comic.ttf",
+            "C:\\Windows\\Fonts\\comicbd.ttf",
+            "/usr/share/fonts/truetype/msttcorefonts/comic.ttf",
+            "/usr/share/fonts/truetype/comic.ttf",
+        ]
+        found = [p for p in candidates if os.path.isfile(p)]
+        if len(found) >= 2:
+            return (
+                ImageFont.truetype(found[0], size),
+                ImageFont.truetype(found[1], size),
+                ImageFont.truetype(found[1], size),
+            )
+        elif len(found) == 1:
+            f = ImageFont.truetype(found[0], size)
+            return f, f, f
+        # Fall back to sans if comic not found
+        style = "sans"
+
+    if style == "sans":
+        cand_reg = os.path.join(font_dir, "DejaVuSans.ttf")
+        cand_bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
+        cand_italic = os.path.join(font_dir, "DejaVuSans-BoldOblique.ttf")
+        if os.path.isfile(cand_reg) and os.path.isfile(cand_bold):
+            return (
+                ImageFont.truetype(cand_reg, size),
+                ImageFont.truetype(cand_bold, size),
+                ImageFont.truetype(
+                    cand_italic if os.path.isfile(cand_italic) else cand_bold, size
+                ),
+            )
+
+    # Default: serif
     cand_reg = os.path.join(font_dir, "DejaVuSerif.ttf")
     cand_bold = os.path.join(font_dir, "DejaVuSerif-Bold.ttf")
     cand_italic = os.path.join(font_dir, "DejaVuSerif-BoldItalic.ttf")
-
     if os.path.isfile(cand_reg) and os.path.isfile(cand_bold):
-        f_reg = ImageFont.truetype(cand_reg, size)
-        f_bold = ImageFont.truetype(cand_bold, size)
-        f_italic = ImageFont.truetype(
-            cand_italic if os.path.isfile(cand_italic) else cand_bold, size
+        return (
+            ImageFont.truetype(cand_reg, size),
+            ImageFont.truetype(cand_bold, size),
+            ImageFont.truetype(
+                cand_italic if os.path.isfile(cand_italic) else cand_bold, size
+            ),
         )
-        return f_reg, f_bold, f_italic
-
-    # Fallback: DejaVuSans
-    cand_reg = os.path.join(font_dir, "DejaVuSans.ttf")
-    cand_bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
-    cand_italic = os.path.join(font_dir, "DejaVuSans-BoldOblique.ttf")
-    if os.path.isfile(cand_reg) and os.path.isfile(cand_bold):
-        f_reg = ImageFont.truetype(cand_reg, size)
-        f_bold = ImageFont.truetype(cand_bold, size)
-        f_italic = ImageFont.truetype(
-            cand_italic if os.path.isfile(cand_italic) else cand_bold, size
-        )
-        return f_reg, f_bold, f_italic
 
     f = ImageFont.load_default()
     return f, f, f
@@ -460,14 +438,15 @@ def render_qa_cell(
     width=560,
     height=512,
     base_font_size=24,
+    font_style="serif",
 ):
     """
     Renders the QA column as a clean, publication-ready image:
     - Pure white background with no outer border box
-    - 'Q:' in bold serif
+    - 'Q:' in bold font
     - Question text line-wrapped
-    - 'A:' in bold serif
-    - '<p> category </p>' and '[SEG]' in bold italic serif with class color
+    - 'A:' in bold font
+    - '<p> category </p>' and '[SEG]' in bold italic with class color
     - Text centered vertically relative to the image row
     """
     color_uint8 = (
@@ -478,8 +457,8 @@ def render_qa_cell(
     black_color = (15, 15, 15)
 
     for font_size in [base_font_size, base_font_size - 3, base_font_size - 6]:
-        f_reg, f_bold, f_italic = _get_font_bundle(font_size)
-        pad_x = 24
+        f_reg, f_bold, f_italic = _get_font_bundle(font_size, style=font_style)
+        pad_x = 12
         max_w = width - pad_x * 2
         line_h = int(font_size * 1.45)
 
@@ -542,7 +521,7 @@ def render_qa_cell(
     out_img = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(out_img)
 
-    start_y = max(24, int((height - total_h) * 0.45))
+    start_y = max(18, int((height - total_h) * 0.45))
     y = start_y
     for cur_line, is_blank in lines:
         if is_blank:
@@ -561,41 +540,54 @@ def render_qa_cell(
 # Figure builder
 # ==============================================================================
 
-def build_figure(rows, cmap, dataset_type, output_path, alpha=0.45):
+def build_figure(
+    rows,
+    cmap,
+    dataset_type,
+    output_path,
+    alpha=0.45,
+    qa_font_size=24,
+    qa_font_style="serif",
+    header_font_size=25,
+):
     """
     Build and save the final publication-quality figure.
 
     Columns:
         QA  |  Image  |  Ground Truth  |  Pred Mask
 
-    No suptitle at top, no legend at bottom.
+    Features:
+    - Tight column spacing (wspace=0.01)
+    - Headings snug to the top row with enlarged font (+3 pt = 25 pt)
+    - Configurable QA font size & font style (serif, sans, comic)
+    - No suptitle at top, no legend at bottom
     """
     n_rows = len(rows)
     col_labels = ["QA", "Image", "Ground Truth", "Pred Mask"]
 
-    # Target height per row in figure: 4.4 inches
-    fig_height = 4.4 * n_rows + 0.8
+    # Target height per row in figure: 4.3 inches
+    fig_height = 4.3 * n_rows + 0.6
     fig = plt.figure(figsize=(19, fig_height))
     gs = gridspec.GridSpec(
         n_rows + 1,
         4,
-        height_ratios=[0.22] + [1.0] * n_rows,
+        height_ratios=[0.08] + [1.0] * n_rows,
         width_ratios=[1.15, 1.0, 1.0, 1.0],
-        hspace=0.08,
-        wspace=0.04,
-        top=0.96,
-        bottom=0.04,
-        left=0.02,
-        right=0.98,
+        hspace=0.03,
+        wspace=0.01,
+        top=0.97,
+        bottom=0.03,
+        left=0.015,
+        right=0.985,
     )
 
-    # -- Column headers (very top of figure, NO SUPTITLE) ----------------------
+    # -- Column headers (very top of figure, snug to top row, NO SUPTITLE) -----
     for col_idx, label in enumerate(col_labels):
         ax = fig.add_subplot(gs[0, col_idx])
         ax.text(
-            0.5, 0.5, label,
+            0.5, 0.25, label,
             transform=ax.transAxes,
-            fontsize=22, fontweight="bold",
+            fontsize=header_font_size, fontweight="bold",
             ha="center", va="center",
             family="sans-serif",
         )
@@ -617,7 +609,8 @@ def build_figure(rows, cmap, dataset_type, output_path, alpha=0.45):
             category_color_rgb=color_rgb,
             width=cell_w,
             height=cell_h,
-            base_font_size=24,
+            base_font_size=qa_font_size,
+            font_style=qa_font_style,
         )
         ax_qa.imshow(qa_cell)
         ax_qa.axis("off")
@@ -706,6 +699,19 @@ def parse_args():
              "Must match the version used during training.",
     )
     p.add_argument(
+        "--qa_font_size", type=int, default=24,
+        help="Font size for QA text (default: 24).",
+    )
+    p.add_argument(
+        "--qa_font_style", type=str, default="serif",
+        choices=["serif", "sans", "comic"],
+        help="Font style for QA text: serif (default), sans, or comic.",
+    )
+    p.add_argument(
+        "--header_font_size", type=int, default=25,
+        help="Font size for column headers (default: 25).",
+    )
+    p.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducible sample selection.",
     )
@@ -725,6 +731,31 @@ class _ModelArgs:
 
 def main():
     args = parse_args()
+
+    # -- Deferred imports (require detectron2, torch models, etc.) -------------
+    import transformers
+    from transformers import SiglipImageProcessor
+    from segearth_r2.utils import conversation as conversation_lib
+    from segearth_r2.utils.builder import load_pretrained_model
+    from segearth_r2.datasets.dataset import (
+        DataCollatorForCOCODatasetV2,
+        LaSeRSDataset,
+        EarthReasonDataset,
+        RefSegRSDataset,
+        RRSISDDataset,
+        LISS4ReasonDataset,
+        RISBenchDataset,
+    )
+
+    # Make dataset classes available to create_dataset() via a lookup dict
+    _DATASET_CLASSES = {
+        "LaSeRS": LaSeRSDataset,
+        "EarthReason": EarthReasonDataset,
+        "RefSegRS": RefSegRSDataset,
+        "RRSISD": RRSISDDataset,
+        "LISS4Reason": LISS4ReasonDataset,
+        "RISBench": RISBenchDataset,
+    }
 
     # -- Interactive prompt for num_samples ------------------------------------
     if args.num_samples is None:
@@ -779,6 +810,7 @@ def main():
     dataset = create_dataset(
         args.dataset_type, args.base_data_path,
         tokenizer, data_args_ns, args.data_split,
+        dataset_classes=_DATASET_CLASSES,
     )
     total = len(dataset)
     print(f"Dataset size: {total}")
@@ -918,6 +950,9 @@ def main():
         dataset_type=args.dataset_type,
         output_path=args.output_path,
         alpha=args.overlay_alpha,
+        qa_font_size=args.qa_font_size,
+        qa_font_style=args.qa_font_style,
+        header_font_size=args.header_font_size,
     )
 
 
