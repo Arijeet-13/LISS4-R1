@@ -357,45 +357,54 @@ def _get_font_bundle(size=24, style="serif"):
 def render_qa_cell(
     question_text,
     answer_text,
-    category_color_rgb,
+    category_color_rgb=None,
     width=560,
     height=512,
     base_font_size=24,
     font_style="serif",
     category=None,
+    cmap=None,
 ):
-    color_uint8 = (
-        int(category_color_rgb[0] * 255),
-        int(category_color_rgb[1] * 255),
-        int(category_color_rgb[2] * 255),
+    def _to_uint8(col):
+        return (int(col[0] * 255), int(col[1] * 255), int(col[2] * 255))
+
+    default_col_uint8 = (
+        _to_uint8(category_color_rgb)
+        if category_color_rgb is not None
+        else (220, 38, 38)
     )
     black_color = (15, 15, 15)
 
-    cat_word = category.strip() if category else ""
-    cat_pat = rf"\b{re.escape(cat_word)}\b" if len(cat_word) >= 2 else None
-    if cat_pat:
-        split_pattern = rf"(<p>.*?</p>|\[SEG\]|{cat_pat})"
-    else:
-        split_pattern = r"(<p>.*?</p>|\[SEG\])"
-
     def _tokenize_text(text, default_color):
-        parts = re.split(split_pattern, text, flags=re.IGNORECASE)
+        parts = re.split(r"(<p>.*?</p>|\[SEG\])", text, flags=re.IGNORECASE)
         res = []
+        last_highlight_color = default_col_uint8
         for p in parts:
             if not p:
                 continue
             p_strip = p.strip()
             if not p_strip:
                 continue
-            is_highlight = (
-                p_strip.startswith("<p>")
-                or p_strip == "[SEG]"
-                or (cat_pat and bool(re.fullmatch(cat_pat, p_strip, flags=re.IGNORECASE)))
-            )
-            if is_highlight:
-                res.append((p_strip + " ", f_italic, color_uint8))
+            if p_strip.startswith("<p>"):
+                tag_cat = re.sub(r"</?p>", "", p_strip).strip()
+                if cmap and tag_cat:
+                    last_highlight_color = _to_uint8(cmap(tag_cat))
+                res.append((p_strip + " ", f_italic, last_highlight_color))
+            elif p_strip == "[SEG]":
+                res.append((p_strip + " ", f_italic, last_highlight_color))
             else:
-                res.append((p_strip + " ", f_reg, default_color))
+                if category and category.lower() in p_strip.lower() and len(category) >= 2:
+                    sub_parts = re.split(rf"(\b{re.escape(category)}\b)", p_strip, flags=re.IGNORECASE)
+                    for sp in sub_parts:
+                        if not sp:
+                            continue
+                        if sp.lower() == category.lower():
+                            cat_c = _to_uint8(cmap(category)) if cmap else default_col_uint8
+                            res.append((sp + " ", f_italic, cat_c))
+                        else:
+                            res.append((sp + " ", f_reg, default_color))
+                else:
+                    res.append((p_strip + " ", f_reg, default_color))
         return res
 
     for font_size in [base_font_size, base_font_size - 3, base_font_size - 6]:
@@ -513,6 +522,7 @@ def build_figure(
         cell_h = 512
         cell_w = int(cell_h * 1.15)
 
+        # 1. QA Cell
         ax_qa = fig.add_subplot(gs[row_idx + 1, 0])
         qa_cell = render_qa_cell(
             question_text=row_data["question"],
@@ -523,25 +533,37 @@ def build_figure(
             base_font_size=qa_font_size,
             font_style=qa_font_style,
             category=row_data.get("category"),
+            cmap=cmap,
         )
         ax_qa.imshow(qa_cell)
         ax_qa.axis("off")
 
+        # 2. Original Image
         ax_img = fig.add_subplot(gs[row_idx + 1, 1])
         ax_img.imshow(img_rgb)
         ax_img.axis("off")
 
+        # 3. Ground Truth overlay
         ax_gt = fig.add_subplot(gs[row_idx + 1, 2])
-        gt_overlay = overlay_mask_on_image(
-            img_rgb, row_data["gt_mask"], color_rgb, alpha
-        )
+        gt_overlay = img_rgb.copy()
+        masks_to_draw = row_data.get("gt_masks", [(row_data.get("gt_mask"), row_data.get("category"))])
+        for mask_bin, cat_name in masks_to_draw:
+            if mask_bin is not None:
+                gt_overlay = overlay_mask_on_image(
+                    gt_overlay, mask_bin, cmap(cat_name), alpha
+                )
         ax_gt.imshow(gt_overlay)
         ax_gt.axis("off")
 
+        # 4. Predicted Mask overlay
         ax_pred = fig.add_subplot(gs[row_idx + 1, 3])
-        pred_overlay = overlay_mask_on_image(
-            img_rgb, row_data["pred_mask"], color_rgb, alpha
-        )
+        pred_overlay = img_rgb.copy()
+        preds_to_draw = row_data.get("pred_masks", [(row_data.get("pred_mask"), row_data.get("category"))])
+        for mask_bin, cat_name in preds_to_draw:
+            if mask_bin is not None:
+                pred_overlay = overlay_mask_on_image(
+                    pred_overlay, mask_bin, cmap(cat_name), alpha
+                )
         ax_pred.imshow(pred_overlay)
         ax_pred.axis("off")
 
@@ -868,16 +890,6 @@ def main():
         if not outputs:
             continue
 
-        result = outputs[0]
-        pred_np = result["pred"]
-        gt_np = result["gt"]
-
-        if gt_np is None:
-            continue
-
-        pred_bin = (pred_np > 0).astype(np.uint8).squeeze()
-        gt_bin = (gt_np > 0).astype(np.uint8).squeeze()
-
         final_answer = answer
         if args.use_llm_response:
             try:
@@ -892,16 +904,37 @@ def main():
             except Exception as e:
                 print(f"  [idx={idx}] LLM response fallback to dataset: {e}")
 
+        # Extract all categories mentioned in <p> ... </p> in answer
+        p_cats = [c.strip() for c in re.findall(r"<p>\s*(.*?)\s*</p>", final_answer) if c.strip()]
+        if not p_cats:
+            instruction_text = question
+            p_cats = [extract_category(instruction_text, args.dataset_type)]
+
+        for c in p_cats:
+            _ = cmap(c)  # register each category colour
+
+        # Collect all GT and Pred masks from outputs
+        gt_masks = []
+        pred_masks = []
+        for out_idx, out in enumerate(outputs):
+            c_name = p_cats[out_idx] if out_idx < len(p_cats) else p_cats[-1]
+            if out.get("gt") is not None:
+                g_bin = (out["gt"] > 0).astype(np.uint8).squeeze()
+                gt_masks.append((g_bin, c_name))
+            if out.get("pred") is not None:
+                p_bin = (out["pred"] > 0).astype(np.uint8).squeeze()
+                pred_masks.append((p_bin, c_name))
+
+        if not gt_masks:
+            continue
+
         try:
             image_rgb = load_original_image(image_path)
         except Exception as e:
             print(f"  [skip idx={idx}] Image load error: {e}")
             continue
 
-        instruction_text = question  # the referring instruction
-        category = extract_category(instruction_text, args.dataset_type)
-        _ = cmap(category)  # register colour
-
+        category = p_cats[0]
         question_disp, answer_disp = format_qa_for_display(
             question, final_answer, category, len(selected_rows)
         )
@@ -910,14 +943,17 @@ def main():
             "question": question_disp,
             "answer": answer_disp,
             "image_rgb": image_rgb,
-            "gt_mask": gt_bin,
-            "pred_mask": pred_bin,
+            "gt_masks": gt_masks,
+            "pred_masks": pred_masks,
+            "gt_mask": gt_masks[0][0],
+            "pred_mask": pred_masks[0][0] if pred_masks else gt_masks[0][0],
             "category": category,
         })
 
+        cat_summary = ", ".join(p_cats)
         print(
             f"  [{len(selected_rows)}/{args.num_samples}]  idx={idx}  "
-            f"category=\"{category}\""
+            f"categories=\"{cat_summary}\"  masks={len(gt_masks)}"
         )
 
     if not selected_rows:
