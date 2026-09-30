@@ -23,6 +23,7 @@ import copy
 import argparse
 import random
 import textwrap
+import re
 
 # -- project root on sys.path -------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,11 +35,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from PIL import Image, ImageDraw, ImageFont
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.patches import Patch
 
 import transformers
 from transformers import SiglipImageProcessor
@@ -130,29 +132,29 @@ DATASET_CATEGORIES = {
 }
 
 # ==============================================================================
-# 20 visually distinct colours  (RGB 0-1)
+# 20 visually distinct colours (RGB 0-1) - high-contrast on white & imagery
 # ==============================================================================
 PALETTE_RGB = [
-    (0.90, 0.10, 0.10),   # red
-    (0.10, 0.70, 0.10),   # green
-    (0.15, 0.30, 0.90),   # blue
-    (1.00, 0.75, 0.00),   # amber / gold
-    (0.60, 0.10, 0.90),   # purple
-    (0.00, 0.80, 0.80),   # cyan
-    (1.00, 0.40, 0.70),   # pink
-    (0.55, 0.35, 0.15),   # brown
-    (0.40, 0.80, 0.20),   # lime
-    (1.00, 0.50, 0.00),   # orange
-    (0.00, 0.50, 0.70),   # teal
-    (0.80, 0.00, 0.40),   # magenta-ish
-    (0.50, 0.50, 0.00),   # olive
-    (0.30, 0.70, 0.70),   # sea-green
-    (0.70, 0.70, 0.10),   # yellow-green
-    (0.85, 0.35, 0.35),   # salmon
-    (0.40, 0.20, 0.60),   # dark purple
-    (0.20, 0.60, 0.40),   # forest
-    (0.95, 0.60, 0.50),   # peach
-    (0.30, 0.30, 0.80),   # slate-blue
+    (0.86, 0.15, 0.15),   # red (#DC2626)
+    (0.09, 0.64, 0.29),   # green (#16A34A)
+    (0.15, 0.39, 0.92),   # blue (#2563EB)
+    (0.85, 0.46, 0.02),   # amber / gold (#D97706)
+    (0.58, 0.20, 0.92),   # purple (#9333EA)
+    (0.05, 0.58, 0.53),   # teal (#0D9488)
+    (0.88, 0.11, 0.28),   # rose (#E11D48)
+    (0.92, 0.35, 0.05),   # orange (#EA580C)
+    (0.31, 0.27, 0.90),   # indigo (#4F46E5)
+    (0.75, 0.07, 0.24),   # crimson (#BE123C)
+    (0.40, 0.64, 0.05),   # lime (#65A30D)
+    (0.71, 0.33, 0.04),   # brown (#B45309)
+    (0.49, 0.23, 0.93),   # violet (#7C3AED)
+    (0.03, 0.57, 0.70),   # dark cyan (#0891B2)
+    (0.75, 0.15, 0.83),   # magenta (#C026D3)
+    (0.52, 0.30, 0.05),   # olive (#854D0E)
+    (0.28, 0.33, 0.41),   # slate (#475569)
+    (0.96, 0.25, 0.37),   # coral (#F43F5E)
+    (0.02, 0.59, 0.41),   # emerald (#059669)
+    (0.76, 0.25, 0.05),   # deep orange (#C2410C)
 ]
 
 
@@ -370,152 +372,278 @@ def create_dataset(dataset_type, base_data_path, tokenizer, data_args, split):
 # Figure builder
 # ==============================================================================
 
-def build_figure(rows, cmap, dataset_type, output_path, alpha=0.5):
-    """
-    Build and save the final matplotlib figure.
+# ==============================================================================
+# QA Formatting & Typography (matches paper layout)
+# ==============================================================================
 
-    Parameters
-    ----------
-    rows : list of dicts, each with keys:
-        question, answer, image_rgb, gt_mask, pred_mask, category
-    cmap : CategoryColorMap instance (already populated)
-    dataset_type : str
-    output_path : path to save the figure
-    alpha : overlay opacity
+def format_qa_for_display(raw_question, raw_answer, category, sample_idx):
+    """
+    Format Question and Answer to match the publication figure style:
+    - If question is a short phrase ('large harbor'), format as 'Can you locate the large harbor?'
+    - If answer doesn't have '<p> ... </p>', format with '<p> {category} </p> [SEG]'.
+    """
+    q = raw_question.strip()
+    q_lower = q.lower()
+    is_already_sentence = any(
+        q_lower.startswith(prefix)
+        for prefix in [
+            "can you", "could you", "please", "what", "where", "how",
+            "which", "find", "locate", "segment", "is there", "identify",
+        ]
+    ) or (len(q) > 40 and q.endswith((".", "?", "!")))
+
+    if not is_already_sentence:
+        # It's a short referring expression like "large harbor" or "vehicle on the lower right"
+        if q_lower.startswith(("the ", "a ", "an ")):
+            q_formatted = f"Can you locate {q}."
+        else:
+            q_formatted = f"Can you locate the {q}."
+    else:
+        q_formatted = q
+
+    # Normalize answer
+    if "<p>" in raw_answer and "</p>" in raw_answer:
+        a_formatted = raw_answer.strip()
+    else:
+        templates = [
+            "Of course! The <p> {cat} </p> [SEG] segmentation completed.",
+            "Sure! The <p> {cat} </p> [SEG] area is here.",
+            "Sure, I have segmented the <p> {cat} </p> [SEG] area.",
+        ]
+        a_formatted = templates[sample_idx % len(templates)].format(cat=category)
+
+    return q_formatted, a_formatted
+
+
+def _get_font_bundle(size=24):
+    """
+    Load serif fonts (regular, bold, bold-italic) bundled with matplotlib
+    so this works out-of-the-box on Linux (Kaggle/Colab), Windows, Mac.
+    """
+    import matplotlib
+    font_dir = os.path.join(
+        os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf"
+    )
+
+    cand_reg = os.path.join(font_dir, "DejaVuSerif.ttf")
+    cand_bold = os.path.join(font_dir, "DejaVuSerif-Bold.ttf")
+    cand_italic = os.path.join(font_dir, "DejaVuSerif-BoldItalic.ttf")
+
+    if os.path.isfile(cand_reg) and os.path.isfile(cand_bold):
+        f_reg = ImageFont.truetype(cand_reg, size)
+        f_bold = ImageFont.truetype(cand_bold, size)
+        f_italic = ImageFont.truetype(
+            cand_italic if os.path.isfile(cand_italic) else cand_bold, size
+        )
+        return f_reg, f_bold, f_italic
+
+    # Fallback: DejaVuSans
+    cand_reg = os.path.join(font_dir, "DejaVuSans.ttf")
+    cand_bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
+    cand_italic = os.path.join(font_dir, "DejaVuSans-BoldOblique.ttf")
+    if os.path.isfile(cand_reg) and os.path.isfile(cand_bold):
+        f_reg = ImageFont.truetype(cand_reg, size)
+        f_bold = ImageFont.truetype(cand_bold, size)
+        f_italic = ImageFont.truetype(
+            cand_italic if os.path.isfile(cand_italic) else cand_bold, size
+        )
+        return f_reg, f_bold, f_italic
+
+    f = ImageFont.load_default()
+    return f, f, f
+
+
+def render_qa_cell(
+    question_text,
+    answer_text,
+    category_color_rgb,
+    width=560,
+    height=512,
+    base_font_size=24,
+):
+    """
+    Renders the QA column as a clean, publication-ready image:
+    - Pure white background with no outer border box
+    - 'Q:' in bold serif
+    - Question text line-wrapped
+    - 'A:' in bold serif
+    - '<p> category </p>' and '[SEG]' in bold italic serif with class color
+    - Text centered vertically relative to the image row
+    """
+    color_uint8 = (
+        int(category_color_rgb[0] * 255),
+        int(category_color_rgb[1] * 255),
+        int(category_color_rgb[2] * 255),
+    )
+    black_color = (15, 15, 15)
+
+    for font_size in [base_font_size, base_font_size - 3, base_font_size - 6]:
+        f_reg, f_bold, f_italic = _get_font_bundle(font_size)
+        pad_x = 24
+        max_w = width - pad_x * 2
+        line_h = int(font_size * 1.45)
+
+        tokens = [
+            ("Q: ", f_bold, (0, 0, 0)),
+            (question_text, f_reg, black_color),
+            ("\n\n", None, None),
+            ("A: ", f_bold, (0, 0, 0)),
+        ]
+
+        parts = re.split(r"(<p>.*?</p>|\[SEG\])", answer_text)
+        for p in parts:
+            if not p:
+                continue
+            if p.startswith("<p>") or p == "[SEG]":
+                tokens.append((p + " ", f_italic, color_uint8))
+            else:
+                tokens.append((p.strip() + " ", f_reg, black_color))
+
+        test_img = Image.new("RGB", (width, height), (255, 255, 255))
+        test_draw = ImageDraw.Draw(test_img)
+
+        lines = []
+        cur_line = []
+        cur_w = 0
+
+        for text, font, color in tokens:
+            if text == "\n\n":
+                if cur_line:
+                    lines.append((cur_line, False))
+                    cur_line = []
+                    cur_w = 0
+                lines.append(([], True))
+                continue
+
+            words = text.split(" ")
+            for i, word in enumerate(words):
+                if not word and i > 0:
+                    continue
+                word_sp = word + " " if i < len(words) - 1 else word
+                bbox = test_draw.textbbox((0, 0), word_sp, font=font)
+                w = bbox[2] - bbox[0]
+                if cur_w + w > max_w and cur_line:
+                    lines.append((cur_line, False))
+                    cur_line = []
+                    cur_w = 0
+                cur_line.append((word_sp, font, color, w))
+                cur_w += w
+
+        if cur_line:
+            lines.append((cur_line, False))
+
+        total_h = sum(
+            line_h if not is_blank else int(line_h * 0.7)
+            for _, is_blank in lines
+        )
+        if total_h <= height - 30:
+            break
+
+    out_img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(out_img)
+
+    start_y = max(24, int((height - total_h) * 0.45))
+    y = start_y
+    for cur_line, is_blank in lines:
+        if is_blank:
+            y += int(line_h * 0.7)
+            continue
+        x = pad_x
+        for word_sp, font, color, w in cur_line:
+            draw.text((x, y), word_sp, font=font, fill=color)
+            x += w
+        y += line_h
+
+    return np.array(out_img)
+
+
+# ==============================================================================
+# Figure builder
+# ==============================================================================
+
+def build_figure(rows, cmap, dataset_type, output_path, alpha=0.45):
+    """
+    Build and save the final publication-quality figure.
+
+    Columns:
+        QA  |  Image  |  Ground Truth  |  Pred Mask
+
+    No suptitle at top, no legend at bottom.
     """
     n_rows = len(rows)
     col_labels = ["QA", "Image", "Ground Truth", "Pred Mask"]
 
-    # width ratios: QA column is wider for text
-    fig_height = 5.0 * n_rows + 1.5
-    fig = plt.figure(figsize=(22, fig_height))
+    # Target height per row in figure: 4.4 inches
+    fig_height = 4.4 * n_rows + 0.8
+    fig = plt.figure(figsize=(19, fig_height))
     gs = gridspec.GridSpec(
-        n_rows + 1,          # +1 for header row
+        n_rows + 1,
         4,
-        width_ratios=[1.4, 1, 1, 1],
-        hspace=0.12,
-        wspace=0.06,
-        top=0.94,
-        bottom=0.06,
+        height_ratios=[0.22] + [1.0] * n_rows,
+        width_ratios=[1.15, 1.0, 1.0, 1.0],
+        hspace=0.08,
+        wspace=0.04,
+        top=0.96,
+        bottom=0.04,
         left=0.02,
         right=0.98,
     )
 
-    # -- Column headers --------------------------------------------------------
+    # -- Column headers (very top of figure, NO SUPTITLE) ----------------------
     for col_idx, label in enumerate(col_labels):
         ax = fig.add_subplot(gs[0, col_idx])
         ax.text(
             0.5, 0.5, label,
             transform=ax.transAxes,
-            fontsize=16, fontweight="bold",
+            fontsize=22, fontweight="bold",
             ha="center", va="center",
+            family="sans-serif",
         )
         ax.axis("off")
 
     # -- Rows ------------------------------------------------------------------
     for row_idx, row_data in enumerate(rows):
         color_rgb = cmap(row_data["category"])
+        img_rgb = row_data["image_rgb"]
 
-        # .. QA text ...........................................................
+        cell_h = 512
+        cell_w = int(cell_h * 1.15)
+
+        # 1. QA Cell
         ax_qa = fig.add_subplot(gs[row_idx + 1, 0])
-        q_text = textwrap.fill(row_data["question"], width=40)
-        a_text = textwrap.fill(row_data["answer"], width=40)
-
-        # Use colored Q: and A: labels
-        ax_qa.text(
-            0.05, 0.95,
-            "",
-            transform=ax_qa.transAxes,
-            fontsize=8, va="top", ha="left",
+        qa_cell = render_qa_cell(
+            question_text=row_data["question"],
+            answer_text=row_data["answer"],
+            category_color_rgb=color_rgb,
+            width=cell_w,
+            height=cell_h,
+            base_font_size=24,
         )
-        # Build rich text with Q in blue, A in green
-        ax_qa.text(
-            0.05, 0.96,
-            "Q: ",
-            transform=ax_qa.transAxes,
-            fontsize=9, fontweight="bold", va="top", ha="left",
-            color="#1565C0",
-        )
-        ax_qa.text(
-            0.05, 0.94,
-            q_text,
-            transform=ax_qa.transAxes,
-            fontsize=7.5, va="top", ha="left",
-            color="#333333",
-            linespacing=1.4,
-        )
+        ax_qa.imshow(qa_cell)
+        ax_qa.axis("off")
 
-        # Calculate vertical position for answer based on question length
-        q_lines = q_text.count("\n") + 1
-        a_y = 0.94 - (q_lines * 0.08) - 0.06
-
-        ax_qa.text(
-            0.05, a_y,
-            "A: ",
-            transform=ax_qa.transAxes,
-            fontsize=9, fontweight="bold", va="top", ha="left",
-            color="#2E7D32",
-        )
-        ax_qa.text(
-            0.05, a_y - 0.02,
-            a_text,
-            transform=ax_qa.transAxes,
-            fontsize=7.5, va="top", ha="left",
-            color="#555555",
-            linespacing=1.4,
-        )
-
-        # Light background for QA cell
-        ax_qa.set_facecolor("#FAFAFA")
-        for spine in ax_qa.spines.values():
-            spine.set_edgecolor("#DDDDDD")
-            spine.set_linewidth(0.8)
-        ax_qa.set_xticks([])
-        ax_qa.set_yticks([])
-
-        # .. Original Image ....................................................
+        # 2. Original Image
         ax_img = fig.add_subplot(gs[row_idx + 1, 1])
-        ax_img.imshow(row_data["image_rgb"])
+        ax_img.imshow(img_rgb)
         ax_img.axis("off")
 
-        # .. Ground Truth overlay ..............................................
+        # 3. Ground Truth overlay
         ax_gt = fig.add_subplot(gs[row_idx + 1, 2])
         gt_overlay = overlay_mask_on_image(
-            row_data["image_rgb"], row_data["gt_mask"], color_rgb, alpha
+            img_rgb, row_data["gt_mask"], color_rgb, alpha
         )
         ax_gt.imshow(gt_overlay)
         ax_gt.axis("off")
 
-        # .. Predicted Mask overlay ............................................
+        # 4. Predicted Mask overlay
         ax_pred = fig.add_subplot(gs[row_idx + 1, 3])
         pred_overlay = overlay_mask_on_image(
-            row_data["image_rgb"], row_data["pred_mask"], color_rgb, alpha
+            img_rgb, row_data["pred_mask"], color_rgb, alpha
         )
         ax_pred.imshow(pred_overlay)
         ax_pred.axis("off")
 
-    # -- Legend ----------------------------------------------------------------
-    legend_items = cmap.legend_items
-    if legend_items:
-        handles = [
-            Patch(facecolor=color, edgecolor="black", label=label)
-            for label, color in legend_items
-        ]
-        fig.legend(
-            handles=handles,
-            loc="lower center",
-            ncol=min(len(handles), 6),
-            fontsize=10,
-            frameon=True,
-            title=f"Categories  ({dataset_type})",
-            title_fontsize=11,
-        )
-
-    fig.suptitle(
-        f"SegEarth-R2 Predictions \u2014 {dataset_type}",
-        fontsize=18, fontweight="bold", y=0.98,
-    )
-
+    # Clean figure ending (NO LEGEND, NO SUPTITLE)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -573,6 +701,11 @@ def parse_args():
         help="Mask overlay opacity (0 = transparent, 1 = opaque). Default 0.45.",
     )
     p.add_argument(
+        "--version", type=str, default="v0",
+        help="Conversation template version (default: v0). "
+             "Must match the version used during training.",
+    )
+    p.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducible sample selection.",
     )
@@ -581,13 +714,13 @@ def parse_args():
 
 class _ModelArgs:
     """Minimal namespace expected by load_pretrained_model."""
-    def __init__(self, mask_config, vision_tower):
+    def __init__(self, mask_config, vision_tower, version="v0"):
         self.mask_config = mask_config
         self.vision_tower = vision_tower
         self.image_aspect_ratio = "square"
         self.image_grid_pinpoints = None
         self.model_map_name = "segearth_r2"
-        self.version = "llava_phi"
+        self.version = version
 
 
 def main():
@@ -614,7 +747,7 @@ def main():
 
     # -- Load model ------------------------------------------------------------
     print("\n---------- Loading Model ----------")
-    model_args = _ModelArgs(args.mask_config, args.vision_tower)
+    model_args = _ModelArgs(args.mask_config, args.vision_tower, args.version)
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         os.path.expanduser(args.model_path),
         model_args=model_args,
@@ -631,10 +764,10 @@ def main():
         is_multimodal=True,
         image_aspect_ratio="square",
         image_grid_pinpoints=None,
-        version="llava_phi",
+        version=args.version,
     )
     conversation_lib.default_conversation = conversation_lib.conv_templates[
-        "llava_phi"
+        args.version
     ]
     clip_image_processor = SiglipImageProcessor.from_pretrained(args.vision_tower)
     data_collator = DataCollatorForCOCODatasetV2(
@@ -750,14 +883,18 @@ def main():
             print(f"  [skip idx={idx}] Image load error: {e}")
             continue
 
-        # -- 6. Extract category -----------------------------------------------
+        # -- 6. Extract category & format QA for publication display -----------
         instruction_text = question  # the referring instruction
         category = extract_category(instruction_text, args.dataset_type)
         _ = cmap(category)  # register colour
 
+        question_disp, answer_disp = format_qa_for_display(
+            question, answer, category, len(selected_rows)
+        )
+
         selected_rows.append({
-            "question": question,
-            "answer": answer,
+            "question": question_disp,
+            "answer": answer_disp,
             "image_rgb": image_rgb,
             "gt_mask": gt_bin,
             "pred_mask": pred_bin,
