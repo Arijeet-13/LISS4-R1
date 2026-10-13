@@ -61,7 +61,7 @@ DATASET_CATEGORIES = {
     "RefSegRS": [
         "road", "vehicle", "car", "van", "building", "truck", "trailer",
         "bus", "road marking", "bikeway", "sidewalk", "tree",
-        "low vegetation", "impervious surface",
+        "low vegetation", "impervious surface", "light weight vehicles", "light weight vehicle",
     ],
     "RRSISD": [
         "airplane", "airport", "golf field", "expressway service area",
@@ -117,17 +117,16 @@ PALETTE_RGB = [
     (0.76, 0.25, 0.05),   # deep orange (#C2410C)
 ]
 
-def extract_category(instruction, dataset_type):
+def extract_category(instruction, dataset_type, fallback_text=None):
     cats = DATASET_CATEGORIES.get(dataset_type, [])
-    inst_lower = instruction.lower()
+    full_text = (instruction + " " + (fallback_text or "")).lower()
 
     sorted_cats = sorted(cats, key=len, reverse=True)
     for cat in sorted_cats:
-        if cat.lower() in inst_lower:
+        if cat.lower() in full_text:
             return cat
 
-    words = instruction.strip().split()
-    return " ".join(words[:4]) if words else "object"
+    return "target"
 
 
 class CategoryColorMap:
@@ -145,7 +144,6 @@ class CategoryColorMap:
 
     @property
     def legend_items(self):
-        """Return list of (label, colour) for the legend."""
         return [(k.title(), v) for k, v in self._map.items()]
 
 
@@ -178,7 +176,13 @@ def _get_qa_lasers(dataset, idx):
 
 
 def _get_qa_refsegrs(dataset, idx):
-    question = dataset.refs[idx]
+    phrase = dataset.refs[idx].strip()
+    category = extract_category(phrase, "RefSegRS")
+    if category and category != "target":
+        question = f"Can you segment {category}?"
+    else:
+        clean_phrase = phrase.rstrip(".?")
+        question = f"Can you segment {clean_phrase}?"
     answer = "Sure, it is [SEG]."
     image_path = dataset.images[idx]
     return question, answer, image_path
@@ -375,8 +379,11 @@ def render_qa_cell(
     )
     black_color = (15, 15, 15)
 
-    def _tokenize_text(text, default_color):
-        parts = re.split(r"(<p>.*?</p>|\[SEG\])", text, flags=re.IGNORECASE)
+    q_norm = re.sub(r"\s+", " ", str(question_text or "")).strip()
+    a_norm = re.sub(r"\s+", " ", str(answer_text or "")).strip()
+
+    def _tokenize_answer(text):
+        parts = re.split(r"(<p>.*?</p>|\[SEG\][.,!?;:]*|\[SEG\])", text, flags=re.IGNORECASE)
         res = []
         last_highlight_color = default_col_uint8
         for p in parts:
@@ -390,7 +397,7 @@ def render_qa_cell(
                 if cmap and tag_cat:
                     last_highlight_color = _to_uint8(cmap(tag_cat))
                 res.append((p_strip + " ", f_italic, last_highlight_color))
-            elif p_strip == "[SEG]":
+            elif p_strip.startswith("[SEG]"):
                 res.append((p_strip + " ", f_italic, last_highlight_color))
             else:
                 if category and category.lower() in p_strip.lower() and len(category) >= 2:
@@ -402,9 +409,11 @@ def render_qa_cell(
                             cat_c = _to_uint8(cmap(category)) if cmap else default_col_uint8
                             res.append((sp + " ", f_italic, cat_c))
                         else:
-                            res.append((sp + " ", f_reg, default_color))
+                            for w in sp.split():
+                                res.append((w + " ", f_reg, black_color))
                 else:
-                    res.append((p_strip + " ", f_reg, default_color))
+                    for w in p_strip.split():
+                        res.append((w + " ", f_reg, black_color))
         return res
 
     for font_size in [base_font_size, base_font_size - 3, base_font_size - 6]:
@@ -414,10 +423,13 @@ def render_qa_cell(
         line_h = int(font_size * 1.45)
 
         tokens = [("Q: ", f_bold, (0, 0, 0))]
-        tokens.extend(_tokenize_text(question_text, black_color))
+        for w in q_norm.split():
+            tokens.append((w + " ", f_reg, black_color))
+
         tokens.append(("\n\n", None, None))
+
         tokens.append(("A: ", f_bold, (0, 0, 0)))
-        tokens.extend(_tokenize_text(answer_text, black_color))
+        tokens.extend(_tokenize_answer(a_norm))
 
         test_img = Image.new("RGB", (width, height), (255, 255, 255))
         test_draw = ImageDraw.Draw(test_img)
@@ -490,7 +502,6 @@ def build_figure(
     n_rows = len(rows)
     col_labels = ["QA", "Image", "Ground Truth", "Pred Mask"]
 
-    # Target height per row in figure: 4.3 inches
     fig_height = 4.3 * n_rows + 0.6
     fig = plt.figure(figsize=(19, fig_height))
     gs = gridspec.GridSpec(
@@ -522,7 +533,6 @@ def build_figure(
         cell_h = 512
         cell_w = int(cell_h * 1.15)
 
-        # 1. QA Cell
         ax_qa = fig.add_subplot(gs[row_idx + 1, 0])
         qa_cell = render_qa_cell(
             question_text=row_data["question"],
@@ -538,12 +548,10 @@ def build_figure(
         ax_qa.imshow(qa_cell)
         ax_qa.axis("off")
 
-        # 2. Original Image
         ax_img = fig.add_subplot(gs[row_idx + 1, 1])
         ax_img.imshow(img_rgb)
         ax_img.axis("off")
 
-        # 3. Ground Truth overlay
         ax_gt = fig.add_subplot(gs[row_idx + 1, 2])
         gt_overlay = img_rgb.copy()
         masks_to_draw = row_data.get("gt_masks", [(row_data.get("gt_mask"), row_data.get("category"))])
@@ -555,7 +563,6 @@ def build_figure(
         ax_gt.imshow(gt_overlay)
         ax_gt.axis("off")
 
-        # 4. Predicted Mask overlay
         ax_pred = fig.add_subplot(gs[row_idx + 1, 3])
         pred_overlay = img_rgb.copy()
         preds_to_draw = row_data.get("pred_masks", [(row_data.get("pred_mask"), row_data.get("category"))])
@@ -646,6 +653,11 @@ def parse_args():
         help="Disable LLM generation and directly use the dataset ground-truth answer.",
     )
     p.add_argument(
+        "--classes", nargs="+", default=None,
+        help="Optional list of class categories to filter by (e.g. --classes road van 'light weight vehicles'). "
+             "Only samples matching these classes will be visualized.",
+    )
+    p.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducible sample selection.",
     )
@@ -711,7 +723,6 @@ def generate_llm_response(model, tokenizer, batch, device, max_new_tokens=64):
             generated_ids.append(next_token_id)
             cur_input_ids = torch.cat([cur_input_ids, next_token.unsqueeze(0)], dim=-1)
 
-            # Check for EOS-like strings
             if len(generated_ids) >= 4:
                 decoded_partial = tokenizer.decode(generated_ids, skip_special_tokens=False)
                 if "<|endoftext|>" in decoded_partial or "###" in decoded_partial:
@@ -831,6 +842,10 @@ def main():
     cmap = CategoryColorMap()
 
     print(f"\nRunning inference on {args.num_samples} samples ...")
+    target_classes = [c.lower().strip() for c in args.classes] if args.classes else None
+    if target_classes:
+        print(f"Filtering samples matching classes: {target_classes}")
+
     tried = 0
     for idx in candidate_indices:
         if len(selected_rows) >= args.num_samples:
@@ -842,6 +857,16 @@ def main():
         except Exception as e:
             print(f"  [skip idx={idx}] Q/A extraction error: {e}")
             continue
+
+        if target_classes:
+            raw_ref = ""
+            if hasattr(dataset, "refs") and idx < len(dataset.refs):
+                raw_ref = str(dataset.refs[idx])
+            sample_text = (question + " " + answer + " " + raw_ref).lower()
+            detected_cat = extract_category(question, args.dataset_type, fallback_text=answer)
+            matches = any(tc in sample_text or tc == detected_cat.lower() for tc in target_classes)
+            if not matches:
+                continue
 
         try:
             data_dict = dataset[idx]
@@ -904,16 +929,14 @@ def main():
             except Exception as e:
                 print(f"  [idx={idx}] LLM response fallback to dataset: {e}")
 
-        # Extract all categories mentioned in <p> ... </p> in answer
         p_cats = [c.strip() for c in re.findall(r"<p>\s*(.*?)\s*</p>", final_answer) if c.strip()]
         if not p_cats:
             instruction_text = question
-            p_cats = [extract_category(instruction_text, args.dataset_type)]
+            p_cats = [extract_category(instruction_text, args.dataset_type, fallback_text=final_answer)]
 
         for c in p_cats:
-            _ = cmap(c)  # register each category colour
+            _ = cmap(c)
 
-        # Collect all GT and Pred masks from outputs
         gt_masks = []
         pred_masks = []
         for out_idx, out in enumerate(outputs):
